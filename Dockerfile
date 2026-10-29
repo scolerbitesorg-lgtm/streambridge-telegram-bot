@@ -23,12 +23,12 @@ RUN npm run build
 
 # Set runtime environment variables after build completes
 ENV NODE_ENV=production \
-    PORT=7860
+    PORT=10000
 
 # Ensure full read/write permissions for bot-config.json and temp downloads
 RUN chmod -R 777 /app
 
-EXPOSE 7860
+EXPOSE 10000
 
 # Start the 24/7 Telegram Bot + Express Status Server
 CMD ["npx", "tsx", "server.ts"]
