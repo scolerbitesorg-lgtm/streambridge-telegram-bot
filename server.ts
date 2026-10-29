@@ -1550,13 +1550,22 @@ async function getConnectedUserbotClient(): Promise<TelegramClient | null> {
     return cachedUserbotClient;
   }
 
-  const client = new TelegramClient(new StringSession(stringSession), apiId, apiHash, {
-    connectionRetries: 3,
-  });
-  await client.connect();
-  cachedUserbotClient = client;
-  cachedUserbotSessionKey = key;
-  return client;
+  try {
+    const client = new TelegramClient(new StringSession(stringSession), apiId, apiHash, {
+      connectionRetries: 3,
+    });
+    await client.connect();
+    if (!client.connected) {
+      cachedUserbotClient = null;
+      return null;
+    }
+    cachedUserbotClient = client;
+    cachedUserbotSessionKey = key;
+    return client;
+  } catch (err) {
+    cachedUserbotClient = null;
+    return null;
+  }
 }
 
 async function sendTelegramTextMessage(
@@ -3369,19 +3378,75 @@ function startCloudKeepAliveLoop() {
 }
 startCloudKeepAliveLoop();
 
+interface PingRecord {
+  timestamp: string;
+  userAgent: string;
+  ip: string;
+  source: string;
+}
+
+const recentPingRecords: PingRecord[] = [];
+let totalPingsCount = 0;
+
+function categorizePingSource(userAgent: string): string {
+  const ua = (userAgent || '').toLowerCase();
+  if (ua.includes('uptimerobot')) return 'UptimeRobot';
+  if (ua.includes('betterstack') || ua.includes('betteruptime')) return 'BetterStack';
+  if (ua.includes('cron-job')) return 'Cron-Job.org';
+  if (ua.includes('pingdom')) return 'Pingdom';
+  if (ua.includes('render')) return 'Render Internal HealthCheck';
+  if (ua.includes('streambridge')) return 'StreamBridge Background KeepAlive';
+  if (ua.includes('curl')) return 'Terminal Curl / Health Probe';
+  return 'External Web / User';
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || (process.env.NODE_ENV === 'production' ? 10000 : 3000);
 
   app.use(express.json({ limit: '10mb' }));
 
-  // Lightweight Keep-Alive Ping endpoint so Hugging Face Space or UptimeRobot stays awake 24/7
-  app.get('/api/ping', (_req, res) => {
+  // Keep-Alive Ping endpoint with live Uptime Monitoring telemetry
+  app.get('/api/ping', (req, res) => {
+    const ua = String(req.headers['user-agent'] || 'unknown');
+    const forwarded = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '');
+    const ip = forwarded.split(',')[0].trim();
+    const source = categorizePingSource(ua);
+    totalPingsCount++;
+
+    recentPingRecords.unshift({
+      timestamp: new Date().toISOString(),
+      userAgent: ua,
+      ip,
+      source,
+    });
+    if (recentPingRecords.length > 30) recentPingRecords.pop();
+
+    const uptimeRobotDetected = recentPingRecords.some(
+      (p) => p.source === 'UptimeRobot' || p.source === 'BetterStack' || p.source === 'Cron-Job.org'
+    );
+
     res.json({
       ok: true,
       timestamp: new Date().toISOString(),
       botConnected: botInfoCache.connected,
       isRunningOnHuggingFace: IS_RUNNING_ON_HF,
+      uptimeMonitoring: {
+        active: uptimeRobotDetected,
+        totalPings: totalPingsCount,
+        lastPingSource: source,
+        lastPingTime: new Date().toISOString(),
+        recentPings: recentPingRecords.slice(0, 5),
+      },
+    });
+  });
+
+  app.get('/api/uptime-check', (_req, res) => {
+    const uptimeRobotPings = recentPingRecords.filter((p) => p.source === 'UptimeRobot');
+    res.json({
+      uptimeRobotActive: uptimeRobotPings.length > 0,
+      totalPings: totalPingsCount,
+      recentPings: recentPingRecords.slice(0, 10),
     });
   });
 
@@ -4000,8 +4065,8 @@ async function startServer() {
     if (hasApiId && hasApiHash && hasStringSession) {
       try {
         const client = await getConnectedUserbotClient();
-        if (client) {
-          const me = (await client.getMe()) as any;
+        if (client && client.connected) {
+          const me = (await client.getMe().catch(() => null)) as any;
           if (me) {
             userbotConnected = true;
             userbotAccountName =
