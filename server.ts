@@ -166,25 +166,18 @@ const DURATION_MAP: Record<AccessDurationKey, { label: string; ms: number }> = {
 const BOT_CONFIG_PATH = path.join(process.cwd(), 'bot-config.json');
 
 function generateRandomCodeString(): string {
-  const digits = Math.floor(1000 + Math.random() * 9000);
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let suffix = '';
-  for (let i = 0; i < 3; i++) {
-    suffix += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return `SB-${digits}-${suffix}`;
+  return Math.floor(1000 + Math.random() * 9000).toString();
 }
 
-function createFreshAccessCode(durationKey: AccessDurationKey = '24h'): AccessCodeState {
-  const dur = DURATION_MAP[durationKey] || DURATION_MAP['24h'];
+function createFreshAccessCode(_durationKey: AccessDurationKey = '30d'): AccessCodeState {
   const now = Date.now();
   return {
     code: generateRandomCodeString(),
-    durationKey,
-    durationLabel: dur.label,
-    durationMs: dur.ms,
+    durationKey: '30d',
+    durationLabel: 'Lifetime (Permanent Access)',
+    durationMs: 3650 * 24 * 60 * 60 * 1000,
     createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + dur.ms).toISOString(),
+    expiresAt: '2099-12-31T23:59:59.999Z',
   };
 }
 
@@ -312,20 +305,16 @@ function findMatchingRouteRule(targetUrl?: string): ChannelRouteRule | undefined
 }
 
 function ensureValidAccessCode(): AccessCodeState {
-  const now = Date.now();
-  const exp = new Date(botSettings.accessCode.expiresAt).getTime();
-  if (isNaN(exp) || exp <= now) {
-    botSettings.accessCode = createFreshAccessCode(botSettings.accessCode.durationKey || '24h');
+  if (!botSettings.accessCode || !botSettings.accessCode.code) {
+    botSettings.accessCode = createFreshAccessCode();
+    saveBotSettings();
+  } else if (!/^\d{4}$/.test(botSettings.accessCode.code)) {
+    const digitsOnly = botSettings.accessCode.code.replace(/\D/g, '');
+    botSettings.accessCode.code = digitsOnly.length >= 4 ? digitsOnly.slice(0, 4) : '2612';
+    botSettings.accessCode.durationLabel = 'Lifetime (Permanent Access)';
+    botSettings.accessCode.expiresAt = '2099-12-31T23:59:59.999Z';
     saveBotSettings();
   }
-  let changed = false;
-  for (const [cid, session] of Object.entries(botSettings.authorizedUsers)) {
-    if (new Date(session.expiresAt).getTime() <= now) {
-      delete botSettings.authorizedUsers[cid];
-      changed = true;
-    }
-  }
-  if (changed) saveBotSettings();
   return botSettings.accessCode;
 }
 
@@ -337,7 +326,7 @@ function isChatAuthorized(chatId: string): boolean {
   }
   const session = botSettings.authorizedUsers[chatId];
   if (!session) return false;
-  return new Date(session.expiresAt).getTime() > Date.now();
+  return true;
 }
 
 interface StreamVariant {
@@ -758,7 +747,7 @@ async function resolveAppxVideoStreamUrl(
   }
 
   const finalStreamUrl = /classx\.co\.in/i.test(decrypted)
-    ? `${origin}/api/proxy?url=${encodeURIComponent(decrypted)}`
+    ? `https://studybeepro.site/video?url=${encodeURIComponent(decrypted)}`
     : decrypted;
 
   return {
@@ -1006,7 +995,7 @@ async function inspectUrlAndExtractStreams(
   }
 
   if (/^https?:\/\/[^/]*classx\.co\.in\//i.test(targetUrl)) {
-    targetUrl = `https://studybeepro.site/api/proxy?url=${encodeURIComponent(targetUrl)}`;
+    targetUrl = `https://studybeepro.site/video?url=${encodeURIComponent(targetUrl)}`;
   }
 
   const baseUrl = targetUrl || 'https://localhost/';
@@ -1015,15 +1004,35 @@ async function inspectUrlAndExtractStreams(
   // 1A. Check if URL is StudyBeePro / AppX / TeachX Multi-Folder Course / Subject / Topic / Play URL
   try {
     const u = new URL(targetUrl);
-    const courseId = u.searchParams.get('courseid') || u.searchParams.get('course_id');
+    const isSubjectPage = /\/subject\.html$/i.test(u.pathname);
+    const isTopicPage = /\/topic\.html$/i.test(u.pathname);
+    const isContentPage = /\/content\.html$/i.test(u.pathname);
+    const isPlayPage = /\/play\.html$/i.test(u.pathname);
+    const isRwaPath = u.pathname.includes('/rwax') || u.pathname.includes('/rwa');
+
+    const courseId =
+      u.searchParams.get('courseid') ||
+      u.searchParams.get('course_id') ||
+      (isSubjectPage || isTopicPage || isContentPage ? u.searchParams.get('id') : null) ||
+      u.searchParams.get('id');
     const subjectId = u.searchParams.get('subjectid') || u.searchParams.get('subject_id');
     const topicId = u.searchParams.get('topicid') || u.searchParams.get('topic_id');
-    const videoId = u.searchParams.get('id') || u.searchParams.get('video_id');
-    const domainId = u.searchParams.get('domainId') || u.searchParams.get('domain_id') || 'RWA';
+    const videoId = isPlayPage
+      ? u.searchParams.get('id') || u.searchParams.get('video_id')
+      : u.searchParams.get('video_id');
+    const domainId =
+      u.searchParams.get('domainId') ||
+      u.searchParams.get('domain_id') ||
+      'RWA';
 
     if (
       courseId &&
-      (/\/(topic|subject|content|play)\.html$/i.test(u.pathname) || u.searchParams.has('domainId'))
+      (isSubjectPage ||
+        isTopicPage ||
+        isContentPage ||
+        isPlayPage ||
+        isRwaPath ||
+        u.searchParams.has('domainId'))
     ) {
       const cfg = await fetchAppxDomainConfig(domainId, u.origin);
       const appxHeaders = {
@@ -1175,10 +1184,12 @@ async function inspectUrlAndExtractStreams(
       if (subjRes.ok) {
         const subjJson = (await subjRes.json()) as any;
         const subjects: any[] = Array.isArray(subjJson?.data) ? subjJson.data : [];
-        for (const subj of subjects) {
-          const sName = String(subj.subject_name || `Subject ${subj.subjectid}`).trim();
-          await fetchAllTopicsForSubject(String(subj.subjectid), sName);
-        }
+        await Promise.all(
+          subjects.map(async (subj) => {
+            const sName = String(subj.subject_name || `Subject ${subj.subjectid}`).trim();
+            await fetchAllTopicsForSubject(String(subj.subjectid), sName);
+          })
+        );
         pageTitle = `${cfg.name} — Full Course #${courseId}`;
         return {
           sourceUrl: targetUrl,
@@ -1691,16 +1702,11 @@ async function registerTelegramBotMenu(token: string) {
   }
 }
 
-function buildFeaturesMenuPayload(chatId: string, senderId?: string) {
-  const authSession =
-    botSettings.authorizedUsers[chatId] ||
-    (senderId ? botSettings.authorizedUsers[senderId] : undefined);
-  const remHours = authSession
-    ? Math.max(
-        1,
-        Math.round((new Date(authSession.expiresAt).getTime() - Date.now()) / (1000 * 3600))
-      )
-    : 24;
+function buildFeaturesMenuPayload(chatId: string, _senderId?: string) {
+  const currentCodeState = ensureValidAccessCode();
+  const active4Digit = currentCodeState.code;
+  const botUsername = botInfoCache.username || 'Updates_send_me_bot';
+  const inviteLink = `https://t.me/${botUsername}?start=${active4Digit}`;
 
   const q = (botSettings.globalDefaultQuality || '720p').toLowerCase();
   const fullMode = botSettings.preferFullSingleVideo !== false;
@@ -1714,9 +1720,11 @@ function buildFeaturesMenuPayload(chatId: string, senderId?: string) {
   const text =
     `📋 StreamBridge Bot — All Features Menu (/features)\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🔑 Access Status: Active (${remHours}h left)\n` +
+    `🔑 Access: Lifetime Permanent Active ✅\n` +
+    `🔗 Invite Link: ${inviteLink}\n` +
+    `🔢 4-Digit Code: ${active4Digit}\n` +
     `🎞 Default Quality: ${q.toUpperCase()} (Auto-select before play)\n` +
-    `🎬 Delivery Mode: ${fullMode ? 'Full Single Video (Puri Video up to 2GB)' : 'Fast Split Parts (<48MB)'}\n` +
+    `🎬 Delivery: 1 Full Single Video (No Parts!)\n` +
     `🛡️ Backup Channels/Groups: ${activeBackups.length} active\n` +
     `🎯 Fix-Link -> Channel Rules: ${activeRoutes.length} active\n` +
     `📊 Your Queue: ${activeRunning} active, ${userQueue.length} waiting\n` +
@@ -2058,6 +2066,79 @@ async function uploadToTelegramUserbotMtproto(
   }
 }
 
+// Smart FFmpeg Single-Video Optimizer (Compresses video to <= 48.0 MB so Telegram receives 1 FULL SINGLE VIDEO, zero parts!)
+async function compressMp4ToFit50Mb(filePath: string, durationSec: number): Promise<string> {
+  const stat = await fs.promises.stat(filePath);
+  const sizeMb = stat.size / (1024 * 1024);
+  if (sizeMb <= 48.5 || !ffmpegAvailable) {
+    return filePath;
+  }
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath) || '.mp4';
+  const base = path.basename(filePath, ext);
+  const outPath = path.join(dir, `${base}_single_full${ext}`);
+
+  let dur = durationSec > 0 ? durationSec : 3600;
+  if (dur <= 0) {
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        filePath,
+      ]);
+      const p = parseFloat(stdout.trim());
+      if (Number.isFinite(p) && p > 0) dur = p;
+    } catch {
+      // fallback
+    }
+  }
+
+  // Calculate target bitrate for 47.0 MB (to be safely under Telegram 50MB limit)
+  const targetKiloBits = 47.0 * 1024 * 8; // ~385,024 kilobits
+  const totalBitrateKbps = Math.floor(targetKiloBits / dur);
+  const audioBitrateKbps = dur > 5400 ? 32 : 48;
+  const videoBitrateKbps = Math.max(75, totalBitrateKbps - audioBitrateKbps);
+
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i',
+      filePath,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-b:v',
+      `${videoBitrateKbps}k`,
+      '-maxrate',
+      `${Math.round(videoBitrateKbps * 1.35)}k`,
+      '-bufsize',
+      `${videoBitrateKbps * 2}k`,
+      '-vf',
+      'scale=trunc(iw*min(1\\,854/iw)/2)*2:trunc(ih*min(1\\,854/iw)/2)*2',
+      '-c:a',
+      'aac',
+      '-b:a',
+      `${audioBitrateKbps}k`,
+      '-movflags',
+      '+faststart',
+      outPath,
+    ]);
+
+    const compStat = await fs.promises.stat(outPath);
+    if (compStat.size > 0 && compStat.size < stat.size) {
+      return outPath;
+    }
+  } catch (err) {
+    console.error('[StreamBridge] Compression error:', err);
+  }
+  return filePath;
+}
+
 // Fast 34MB FFmpeg Stream Splitter (Used only if Userbot is unavailable or Split Mode is explicitly enabled)
 async function splitMp4IntoFastPartsIfNeeded(filePath: string): Promise<string[]> {
   const stat = await fs.promises.stat(filePath);
@@ -2202,7 +2283,7 @@ async function processDownloadJob(job: DownloadJob): Promise<void> {
     }
 
     if (/^https?:\/\/[^/]*classx\.co\.in\//i.test(job.sourceUrl)) {
-      job.sourceUrl = `https://studybeepro.site/api/proxy?url=${encodeURIComponent(job.sourceUrl)}`;
+      job.sourceUrl = `https://studybeepro.site/video?url=${encodeURIComponent(job.sourceUrl)}`;
     }
 
     const headers = buildHeaders(job.customHeaders, job.sourceUrl);
@@ -2465,74 +2546,148 @@ async function processDownloadJob(job: DownloadJob): Promise<void> {
           `Delivered FULL video ${job.title} (${sizeMb.toFixed(2)} MB) to ${allDestChatIds.length} destination(s).`
         );
       } else if (botSettings.preferFullSingleVideo && hasUserbotConfigured) {
-        // CASE B: Video > 49 MB & Full Single Video Mode (Default) -> Upload 100% FULL UNSPLIT MP4 via 2GB Userbot & Relay to User + All Backup/Routed Channels!
-        job.status = 'uploading_mtproto_userbot';
-        await updateTelegramProgressIfNeeded(
-          `📤 Uploading FULL Single Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot ( + ${
-            enabledBackups.length
-          } Backup Channel)...`,
-          true
-        );
-        const upRes = await uploadToTelegramUserbotMtproto(
-          job.id,
-          job.filePath,
-          allDestChatIds,
-          caption,
-          videoMeta,
-          (pct) => {
-            job.progressPercent = Math.min(99, 95 + Math.round(pct * 0.04));
-            updateTelegramProgressIfNeeded(
-              `📤 Uploading FULL Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot: ${pct}%...`
-            );
-          }
-        );
-
-        if (upRes.ok) {
-          job.telegramResult = {
-            deliveredVia: 'MTPROTO_USERBOT_2GB',
-            chatId: primaryChat,
-            fileSizeMb: sizeMb.toFixed(2),
-            timestamp: new Date().toISOString(),
-            backedUpTo: enabledBackups.map((b) => b.title),
-            routedToChannel: routedChannelLabel || undefined,
-          };
-          addBotLog(
-            'USERBOT_MTPROTO',
-            primaryChat,
-            `Delivered FULL single video ${job.title} (${sizeMb.toFixed(2)} MB) to ${allDestChatIds.length} destination(s) via 2GB Userbot.`
+        // CASE B: Video > 49 MB & Full Single Video Mode (Default)
+        if (hasUserbotConfigured) {
+          job.status = 'uploading_mtproto_userbot';
+          await updateTelegramProgressIfNeeded(
+            `📤 Uploading FULL Single Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot ( + ${
+              enabledBackups.length
+            } Backup Channel)...`,
+            true
           );
-        } else {
-          // Automatic fallback to split parts only if Userbot encountered an error
-          const parts = await splitMp4IntoFastPartsIfNeeded(job.filePath);
-          job.status = 'uploading_bot_api';
-          for (let idx = 0; idx < parts.length; idx++) {
-            const pPath = parts[idx];
-            const pMeta = await probeVideoMetadataAndThumb(pPath, `${job.id}_p${idx}`);
-            const pSizeMb = (fs.statSync(pPath).size / (1024 * 1024)).toFixed(1);
-            const partCaption = `🎬 ${job.title} [Part ${idx + 1}/${parts.length}]\n${folderLine}${resLine}📦 Size: ${pSizeMb} MB`;
-            const partRes = await uploadToTelegramBotApi(pPath, primaryChat, partCaption, pMeta);
-            if (partRes.ok && partRes.messageId && partRes.fromChatId && secondaryChatIds.length > 0) {
-              for (const destId of secondaryChatIds) {
-                await copyTelegramVideoMessage(
-                  partRes.fromChatId,
-                  partRes.messageId,
-                  destId,
-                  partCaption
-                );
+          const upRes = await uploadToTelegramUserbotMtproto(
+            job.id,
+            job.filePath,
+            allDestChatIds,
+            caption,
+            videoMeta,
+            (pct) => {
+              job.progressPercent = Math.min(99, 95 + Math.round(pct * 0.04));
+              updateTelegramProgressIfNeeded(
+                `📤 Uploading FULL Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot: ${pct}%...`
+              );
+            }
+          );
+
+          if (upRes.ok) {
+            job.telegramResult = {
+              deliveredVia: 'MTPROTO_USERBOT_2GB',
+              chatId: primaryChat,
+              fileSizeMb: sizeMb.toFixed(2),
+              timestamp: new Date().toISOString(),
+              backedUpTo: enabledBackups.map((b) => b.title),
+              routedToChannel: routedChannelLabel || undefined,
+            };
+            addBotLog(
+              'USERBOT_MTPROTO',
+              primaryChat,
+              `Delivered FULL single video ${job.title} (${sizeMb.toFixed(2)} MB) via 2GB Userbot.`
+            );
+          } else {
+            // If Userbot fails, optimize into 1 single complete MP4 without parts
+            await updateTelegramProgressIfNeeded(
+              `🎬 Userbot unavailable. Optimizing into 1 Full Single Video (No parts)...`,
+              true
+            );
+            const singleVideoPath = await compressMp4ToFit50Mb(job.filePath, videoMeta.duration);
+            const compStat = await fs.promises.stat(singleVideoPath);
+            const compSizeMb = compStat.size / (1024 * 1024);
+
+            if (compSizeMb <= 49.5) {
+              job.status = 'uploading_bot_api';
+              await updateTelegramProgressIfNeeded(
+                `📤 Uploading FULL Single Video (${compSizeMb.toFixed(1)} MB, complete video)...`,
+                true
+              );
+              const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
+              const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
+              const partRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
+              if (partRes.ok && partRes.messageId && partRes.fromChatId && secondaryChatIds.length > 0) {
+                for (const destId of secondaryChatIds) {
+                  await copyTelegramVideoMessage(partRes.fromChatId, partRes.messageId, destId, singleCaption);
+                }
+              }
+              job.telegramResult = {
+                deliveredVia: 'BOT_API_50MB',
+                chatId: primaryChat,
+                fileSizeMb: compSizeMb.toFixed(2),
+                timestamp: new Date().toISOString(),
+                backedUpTo: enabledBackups.map((b) => b.title),
+                routedToChannel: routedChannelLabel || undefined,
+              };
+            } else {
+              // Rare extreme fallback
+              const parts = await splitMp4IntoFastPartsIfNeeded(singleVideoPath);
+              job.status = 'uploading_bot_api';
+              for (let idx = 0; idx < parts.length; idx++) {
+                const pPath = parts[idx];
+                const pMeta = await probeVideoMetadataAndThumb(pPath, `${job.id}_p${idx}`);
+                const pSizeMb = (fs.statSync(pPath).size / (1024 * 1024)).toFixed(1);
+                const partCaption = `🎬 ${job.title} [Part ${idx + 1}/${parts.length}]\n${folderLine}${resLine}📦 Size: ${pSizeMb} MB`;
+                await uploadToTelegramBotApi(pPath, primaryChat, partCaption, pMeta);
               }
             }
           }
-          job.telegramResult = {
-            deliveredVia: 'BOT_API_50MB',
-            chatId: primaryChat,
-            fileSizeMb: sizeMb.toFixed(2),
-            timestamp: new Date().toISOString(),
-            backedUpTo: enabledBackups.map((b) => b.title),
-            routedToChannel: routedChannelLabel || undefined,
-          };
+        } else {
+          // Userbot not configured: Optimize to 1 Full Single Video (No parts!)
+          await updateTelegramProgressIfNeeded(
+            `🎬 Preparing 1 Full Single Video (${sizeMb.toFixed(1)} MB) without parts...`,
+            true
+          );
+          const singleVideoPath = await compressMp4ToFit50Mb(job.filePath, videoMeta.duration);
+          const compStat = await fs.promises.stat(singleVideoPath);
+          const compSizeMb = compStat.size / (1024 * 1024);
+
+          if (compSizeMb <= 49.5) {
+            job.status = 'uploading_bot_api';
+            await updateTelegramProgressIfNeeded(
+              `📤 Uploading FULL Single Video (${compSizeMb.toFixed(1)} MB, complete video) to Telegram...`,
+              true
+            );
+            const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
+            const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
+            const upRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
+            if (!upRes.ok) {
+              throw new Error(upRes.error || 'Failed to upload single video');
+            }
+            if (upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
+              for (const destId of secondaryChatIds) {
+                await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, singleCaption);
+              }
+            }
+            job.telegramResult = {
+              deliveredVia: 'BOT_API_50MB',
+              chatId: primaryChat,
+              fileSizeMb: compSizeMb.toFixed(2),
+              timestamp: new Date().toISOString(),
+              backedUpTo: enabledBackups.map((b) => b.title),
+              routedToChannel: routedChannelLabel || undefined,
+            };
+            addBotLog(
+              'OUTGOING',
+              primaryChat,
+              `Delivered FULL single video ${job.title} (${compSizeMb.toFixed(2)} MB) without parts.`
+            );
+          } else {
+            // Fallback only if even compressed video > 49.5 MB
+            const parts = await splitMp4IntoFastPartsIfNeeded(singleVideoPath);
+            job.status = 'uploading_bot_api';
+            for (let idx = 0; idx < parts.length; idx++) {
+              const pPath = parts[idx];
+              const pMeta = await probeVideoMetadataAndThumb(pPath, `${job.id}_p${idx}`);
+              const pSizeMb = (fs.statSync(pPath).size / (1024 * 1024)).toFixed(1);
+              const partCaption = `🎬 ${job.title} [Part ${idx + 1}/${parts.length}]\n${folderLine}${resLine}📦 Size: ${pSizeMb} MB`;
+              const upRes = await uploadToTelegramBotApi(pPath, primaryChat, partCaption, pMeta);
+              if (upRes.ok && upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
+                for (const destId of secondaryChatIds) {
+                  await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, partCaption);
+                }
+              }
+            }
+          }
         }
       } else {
-        // CASE C: Split Mode explicitly chosen or Userbot not configured
+        // CASE C: Split Mode explicitly chosen
         const parts = await splitMp4IntoFastPartsIfNeeded(job.filePath);
         job.status = 'uploading_bot_api';
         await updateTelegramProgressIfNeeded(
@@ -2977,35 +3132,45 @@ async function pollTelegramBotUpdates() {
         addBotLog('INCOMING', chatId, `${firstName}: ${text}`);
 
         const currentCodeState = ensureValidAccessCode();
+        const active4Digit = currentCodeState.code;
+        const botUsername = botInfoCache.username || 'Updates_send_me_bot';
+        const inviteLink = `https://t.me/${botUsername}?start=${active4Digit}`;
 
-        // 3. Check if user is sending the Unique Bot Activation Code (e.g., "SB-4829-X7K")
-        const cleanInputCode = text.replace(/^\/?(code|activate|login)\s+/i, '').trim().toUpperCase();
-        if (cleanInputCode === currentCodeState.code.toUpperCase()) {
-          const durationMs = DURATION_MAP[currentCodeState.durationKey]?.ms || DURATION_MAP['24h'].ms;
-          const durationLabel =
-            DURATION_MAP[currentCodeState.durationKey]?.label || DURATION_MAP['24h'].label;
-          const now = Date.now();
-          const expiresAt = new Date(now + durationMs).toISOString();
+        // 3. Check if user is sending the 4-Digit Code OR clicking the Invite Link
+        const startParamMatch = text.match(/^\/start(?:@\S+)?\s+(\S+)/i);
+        const startPayload = startParamMatch ? startParamMatch[1].trim() : '';
 
+        const isCodeMatch =
+          text.trim() === active4Digit ||
+          text.includes(active4Digit) ||
+          startPayload === active4Digit ||
+          startPayload.includes(active4Digit) ||
+          text.replace(/\D/g, '') === active4Digit;
+
+        if (isCodeMatch && !isChatAuthorized(chatId)) {
           botSettings.authorizedUsers[chatId] = {
             chatId,
             firstName,
             username,
-            activatedWithCode: currentCodeState.code,
-            activatedAt: new Date(now).toISOString(),
-            expiresAt,
+            activatedWithCode: active4Digit,
+            activatedAt: new Date().toISOString(),
+            expiresAt: '2099-12-31T23:59:59.999Z',
           };
           saveBotSettings();
           addBotLog(
             'SYSTEM',
             chatId,
-            `Authorized user ${firstName} (${chatId}) with code ${currentCodeState.code} for ${durationLabel}`
+            `Authorized user ${firstName} (${chatId}) PERMANENTLY with 4-digit invite code ${active4Digit}`
           );
 
           const menu = buildFeaturesMenuPayload(chatId);
           await sendTelegramTextMessage(
             chatId,
-            `✅ Access Granted! (${firstName}) is now activated for ${durationLabel}.\n\n` +
+            `🎉 Congratulations ${firstName}!\n\n` +
+              `✅ Invite Verified! Aapka Bot HAMESHA ke liye Active ho gaya hai (Lifetime Access)!\n\n` +
+              `🔗 Aapka Invite Link: ${inviteLink}\n` +
+              `🔢 4-Digit Invite Code: ${active4Digit}\n\n` +
+              `Ab aap koi bhi video link (.m3u8, course folder, play link, mp4) bhejiye, bot bina rukawat 1 full complete video download karke bhejega.\n\n` +
               menu.text,
             menu.replyMarkup
           );
@@ -3023,13 +3188,18 @@ async function pollTelegramBotUpdates() {
           continue;
         }
 
-        // 4. Enforce Access Code Gate
+        // 4. Enforce Permanent Invite Access Gate
         const senderId = String(msg.from?.id || chatId);
         if (!isChatAuthorized(chatId) && !isChatAuthorized(senderId)) {
           await sendTelegramTextMessage(
             chatId,
-            `🔒 Bot Access Locked!\n\n` +
-              `Bot ko activate karne ke liye Web Control Dashboard se "Unique Bot Activation Code" (e.g. ${currentCodeState.code.slice(0, 3)}XXXX-XXX) copy karein aur yahan send karein.`
+            `🔒 StreamBridge Bot Access Required!\n\n` +
+              `Bot ko use karne ke liye Access Activate karein (Lifetime Permanent):\n\n` +
+              `👉 Option 1: Is Invite Link par tap karein:\n` +
+              `${inviteLink}\n\n` +
+              `👉 Option 2: Ye 4-Digit Code chat me send karein:\n` +
+              `${active4Digit}\n\n` +
+              `✨ Code bhejte hi bot bina kisi expiry ke hamesha ke liye activate ho jayega!`
           );
           addBotLog('SYSTEM', chatId, `Blocked unauthorized message from ${firstName} (${chatId}).`);
           continue;
