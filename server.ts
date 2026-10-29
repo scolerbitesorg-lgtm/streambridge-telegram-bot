@@ -96,6 +96,9 @@ interface HuggingFaceCloudConfig {
   deployedRepoId?: string;
   deployedSpaceUrl?: string;
   deployedAppUrl?: string;
+  githubRepoUrl?: string;
+  renderDeployUrl?: string;
+  runtimeVault?: string;
   lastDeployedAt?: string;
   autoPingEnabled: boolean;
   localPollingPaused: boolean;
@@ -111,7 +114,39 @@ interface PersistedBotSettings {
   hfCloud: HuggingFaceCloudConfig;
 }
 
-const IS_RUNNING_ON_HF = Boolean(process.env.SPACE_ID || process.env.SPACE_AUTHOR_NAME);
+const IS_RUNNING_ON_HF = Boolean(
+  process.env.SPACE_ID ||
+    process.env.SPACE_AUTHOR_NAME ||
+    process.env.RENDER ||
+    process.env.RENDER_EXTERNAL_URL
+);
+
+const VAULT_XOR_KEY = 'SB_24X7_CLOUD_VAULT_2026_KEY';
+
+function encodeRuntimeVault(obj: Record<string, string>): string {
+  const raw = Buffer.from(JSON.stringify(obj), 'utf8');
+  const key = Buffer.from(VAULT_XOR_KEY, 'utf8');
+  const out = Buffer.alloc(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    out[i] = raw[i] ^ key[i % key.length];
+  }
+  return out.toString('hex');
+}
+
+function decodeRuntimeVault(hexStr?: string): Record<string, string> | null {
+  if (!hexStr) return null;
+  try {
+    const buf = Buffer.from(hexStr, 'hex');
+    const key = Buffer.from(VAULT_XOR_KEY, 'utf8');
+    const out = Buffer.alloc(buf.length);
+    for (let i = 0; i < buf.length; i++) {
+      out[i] = buf[i] ^ key[i % key.length];
+    }
+    return JSON.parse(out.toString('utf8'));
+  } catch {
+    return null;
+  }
+}
 
 const DURATION_MAP: Record<AccessDurationKey, { label: string; ms: number }> = {
   '24h': { label: '24 Hours (Daily)', ms: 24 * 60 * 60 * 1000 },
@@ -160,6 +195,15 @@ let botSettings: PersistedBotSettings = {
 
 function saveBotSettings() {
   try {
+    if (process.env.TELEGRAM_BOT_TOKEN?.trim()) {
+      botSettings.hfCloud.runtimeVault = encodeRuntimeVault({
+        TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN.trim(),
+        TELEGRAM_API_ID: process.env.TELEGRAM_API_ID?.trim() || '',
+        TELEGRAM_API_HASH: process.env.TELEGRAM_API_HASH?.trim() || '',
+        TELEGRAM_STRING_SESSION: process.env.TELEGRAM_STRING_SESSION?.trim() || '',
+        TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID?.trim() || '',
+      });
+    }
     fs.writeFileSync(BOT_CONFIG_PATH, JSON.stringify(botSettings, null, 2), 'utf8');
   } catch {
     // ignore
@@ -197,6 +241,17 @@ function loadBotSettings() {
     }
   } catch {
     // ignore
+  }
+  // Restore runtime credentials automatically on Render / Cloud Docker if env vars were not manually typed
+  if (botSettings.hfCloud?.runtimeVault) {
+    const restored = decodeRuntimeVault(botSettings.hfCloud.runtimeVault);
+    if (restored) {
+      for (const [k, v] of Object.entries(restored)) {
+        if (v && !process.env[k]?.trim()) {
+          process.env[k] = v;
+        }
+      }
+    }
   }
   if (IS_RUNNING_ON_HF) {
     botSettings.hfCloud.localPollingPaused = false;
@@ -3286,11 +3341,13 @@ pollTelegramBotUpdates();
 // EXPRESS SERVER (BOT STATUS, SECURITY, BACKUP CHANNELS & LINK ROUTING ENDPOINTS)
 // ============================================================================
 
-// Background 24/7 Keep-Alive Pinger for Hugging Face Space (runs even when web is closed)
+// Background 24/7 Keep-Alive Pinger for Render.com / Hugging Face Space (runs even when web is closed)
 function startCloudKeepAliveLoop() {
   setInterval(async () => {
     const targetUrl =
-      process.env.HF_SPACE_URL?.trim() || botSettings.hfCloud?.deployedAppUrl?.trim();
+      process.env.RENDER_EXTERNAL_URL?.trim() ||
+      process.env.HF_SPACE_URL?.trim() ||
+      botSettings.hfCloud?.deployedAppUrl?.trim();
     if (targetUrl && botSettings.hfCloud?.autoPingEnabled !== false) {
       try {
         await fetch(`${targetUrl.replace(/\/$/, '')}/api/ping`, {
@@ -3650,6 +3707,14 @@ async function startServer() {
         }),
       });
 
+      const repoUrl = `https://github.com/${ghUsername}/${repoName}`;
+      const renderDeployUrl = `https://render.com/deploy?repo=${encodeURIComponent(repoUrl)}`;
+
+      botSettings.hfCloud.githubRepoUrl = repoUrl;
+      botSettings.hfCloud.renderDeployUrl = renderDeployUrl;
+      botSettings.hfCloud.lastDeployedAt = new Date().toISOString();
+      saveBotSettings();
+
       const projectFiles = [
         'Dockerfile',
         'render.yaml',
@@ -3662,12 +3727,24 @@ async function startServer() {
         'src/App.tsx',
         'src/main.tsx',
         'src/index.css',
+        'bot-config.json',
       ];
 
       for (const relPath of projectFiles) {
         const absPath = path.join(process.cwd(), relPath);
         if (!fs.existsSync(absPath)) continue;
-        const contentB64 = Buffer.from(fs.readFileSync(absPath, 'utf8'), 'utf8').toString('base64');
+        let rawContent = fs.readFileSync(absPath, 'utf8');
+        if (relPath === 'bot-config.json') {
+          const remoteCfg: PersistedBotSettings = {
+            ...botSettings,
+            hfCloud: {
+              ...botSettings.hfCloud,
+              localPollingPaused: false,
+            },
+          };
+          rawContent = JSON.stringify(remoteCfg, null, 2);
+        }
+        const contentB64 = Buffer.from(rawContent, 'utf8').toString('base64');
 
         // Check if file exists to get sha
         let existingSha: string | undefined;
@@ -3695,10 +3772,7 @@ async function startServer() {
         });
       }
 
-      const repoUrl = `https://github.com/${ghUsername}/${repoName}`;
-      const renderDeployUrl = `https://render.com/deploy?repo=${encodeURIComponent(repoUrl)}`;
-
-      addBotLog('SYSTEM', 'gh-cloud', `Pushed 24/7 Bot repository to GitHub: ${repoUrl}`);
+      addBotLog('SYSTEM', 'gh-cloud', `Pushed 24/7 Bot repository (with zero-input credentials vault) to GitHub: ${repoUrl}`);
       res.json({
         ok: true,
         repoUrl,
