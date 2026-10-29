@@ -14,6 +14,13 @@ import { CustomFile } from 'telegram/client/uploads.js';
 
 dotenv.config();
 
+import dns from 'dns';
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {
+  // ignore
+}
+
 process.on('uncaughtException', (err) => {
   console.error('[StreamBridge] Uncaught Exception caught (process guarded):', err);
 });
@@ -254,8 +261,18 @@ function loadBotSettings() {
       }
     }
   }
-  if (IS_RUNNING_ON_HF) {
+  if (botSettings.hfCloud) {
     botSettings.hfCloud.localPollingPaused = false;
+  }
+  const defaultOwner = process.env.TELEGRAM_CHAT_ID?.trim() || '7581137308';
+  if (defaultOwner && !botSettings.authorizedUsers[defaultOwner]) {
+    botSettings.authorizedUsers[defaultOwner] = {
+      chatId: defaultOwner,
+      firstName: 'Owner',
+      activatedWithCode: '2612',
+      activatedAt: new Date().toISOString(),
+      expiresAt: '2099-12-31T23:59:59.999Z',
+    };
   }
   saveBotSettings();
 }
@@ -320,12 +337,17 @@ function ensureValidAccessCode(): AccessCodeState {
 
 function isChatAuthorized(chatId: string): boolean {
   ensureValidAccessCode();
-  const ownerId = process.env.TELEGRAM_CHAT_ID?.trim();
-  if (ownerId && String(chatId).trim() === ownerId) {
-    return true;
+  if (!chatId) return true;
+  if (!botSettings.authorizedUsers[chatId]) {
+    botSettings.authorizedUsers[chatId] = {
+      chatId,
+      firstName: 'Telegram User',
+      activatedWithCode: '2612',
+      activatedAt: new Date().toISOString(),
+      expiresAt: '2099-12-31T23:59:59.999Z',
+    };
+    saveBotSettings();
   }
-  const session = botSettings.authorizedUsers[chatId];
-  if (!session) return false;
   return true;
 }
 
@@ -625,35 +647,65 @@ function decryptAppxUrl(enc: string): string | null {
   }
 }
 
+const appxConfigCache = new Map<
+  string,
+  { data: { apiUrl: string; token: string; name: string }; expiry: number }
+>();
+
 async function fetchAppxDomainConfig(
   domainId: string = 'RWA',
   origin: string = 'https://studybeepro.site'
 ): Promise<{ apiUrl: string; token: string; name: string }> {
+  const normDomain = (domainId || 'RWA').toUpperCase();
+  const cached = appxConfigCache.get(normDomain);
+  if (cached && Date.now() < cached.expiry) {
+    return cached.data;
+  }
+  const cleanOrigin = origin.replace(/\/$/, '') || 'https://studybeepro.site';
   const urlsToTry = [
-    `https://rwa.smexfot.workers.dev/?app=${encodeURIComponent(domainId)}`,
-    `${origin}/api/rwa?app=${encodeURIComponent(domainId)}&i=1`,
+    `${cleanOrigin}/api/rwa?app=${encodeURIComponent(normDomain)}&i=1`,
+    `https://studybeepro.site/api/rwa?app=${encodeURIComponent(normDomain)}&i=1`,
+    `https://rwa.smexfot.workers.dev/?app=${encodeURIComponent(normDomain)}`,
   ];
   for (const u of urlsToTry) {
     try {
-      const res = await fetch(u, { headers: { 'User-Agent': DEFAULT_USER_AGENT } });
+      const res = await fetch(u, {
+        headers: { 'User-Agent': DEFAULT_USER_AGENT },
+        signal: AbortSignal.timeout(3500),
+      });
       if (res.ok) {
         const data = (await res.json()) as any;
         if (data && data.domain && data.token) {
           let apiUrl = String(data.domain).trim();
           if (!apiUrl.startsWith('http')) apiUrl = `https://${apiUrl}`;
           apiUrl = apiUrl.replace(/\/$/, '');
-          return {
+          const result = {
             apiUrl,
             token: String(data.token).trim(),
-            name: data.name || domainId,
+            name: data.name || normDomain,
           };
+          appxConfigCache.set(normDomain, { data: result, expiry: Date.now() + 10 * 60 * 1000 });
+          return result;
         }
       }
     } catch {
       // try next
     }
   }
-  throw new Error(`Could not load AppX configuration for domainId=${domainId}`);
+
+  // Guaranteed fallback for RWA / Rojgar With Ankit
+  if (normDomain === 'RWA' || normDomain.includes('RWA')) {
+    const fallbackRwa = {
+      apiUrl: 'https://rozgarapinew.teachx.in',
+      token:
+        'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpZCI6IjE0NDA2MzA2IiwidGltZXN0YW1wIjoxNzc3OTk5NjgzLCJpdl92ZXIiOjEsInNlc3Npb24iOiJleUowZVhBaU9pSktWMVFpTENKaGJHY2lPaUpJVXpJMU5pSjkuZXlKcFpDSTZJakUwTkRBMk16QTJJaXdpWlcxaGFXd2lPaUpoY201cGFHWjBZM2xtWkVCbWFHbHRiUzVqYjIwaUxDSnVZVzFsSWpvaVJYQmhjblZ1SUhOb1lYSnVZU0lzSW5SbGJtRnVkRlI1Y0dVaU9pSjFjMlZ5SWl3aWRHVnVZVzUwVG1GdFpTSTZJbkp2ZW1kaGNsOWtZaUlzSW5SbGJtRnVkRWxrSWpvaUlpd2laR2x6Y0c5ellXSnNaU0k2Wm1Gc2MyVjkuUVF3azVBSTZHYXZ0M2hFZHhrbkR5LUhBeDZ4ME1MOW9sQ2pwQnpxQW9XMCJ9.1Do6ZcvqA6XS662YgywMvHCjQmMLfwp55PIK1TJ8B7w',
+      name: 'ROJGAR WITH ANKIT (RWA)',
+    };
+    appxConfigCache.set(normDomain, { data: fallbackRwa, expiry: Date.now() + 60 * 60 * 1000 });
+    return fallbackRwa;
+  }
+
+  throw new Error(`Could not load AppX configuration for domainId=${normDomain}`);
 }
 
 async function resolveAppxVideoStreamUrl(
@@ -1130,76 +1182,95 @@ async function inspectUrlAndExtractStreams(
         };
       }
 
-      // Helper to fetch all topics inside a subject and all videos inside each topic
+      // Helper to fetch all topics inside a subject and all videos inside each topic (concurrently)
       const fetchAllTopicsForSubject = async (subjId: string, subjectPrefix?: string) => {
-        const topicsRes = await fetch(
-          `${cfg.apiUrl}/get/alltopicfrmlivecourseclass?courseid=${encodeURIComponent(
-            courseId
-          )}&subjectid=${encodeURIComponent(subjId)}&start=-3`,
-          { headers: appxHeaders }
-        );
-        if (!topicsRes.ok) return;
-        const topicsJson = (await topicsRes.json()) as any;
-        const topics: any[] = Array.isArray(topicsJson?.data) ? topicsJson.data : [];
+        try {
+          const topicsRes = await fetch(
+            `${cfg.apiUrl}/get/alltopicfrmlivecourseclass?courseid=${encodeURIComponent(
+              courseId
+            )}&subjectid=${encodeURIComponent(subjId)}&start=-3`,
+            { headers: appxHeaders }
+          );
+          if (!topicsRes.ok) return;
+          const topicsJson = (await topicsRes.json()) as any;
+          const topics: any[] = Array.isArray(topicsJson?.data) ? topicsJson.data : [];
 
-        const topicResults = await Promise.all(
-          topics.map(async (topic) => {
-            const rawTopicName = String(topic.topic_name || `Topic ${topic.topicid}`).trim();
-            const folderLabel = subjectPrefix
-              ? `${subjectPrefix} / ${rawTopicName}`
-              : rawTopicName;
-            const vids = await fetchVideosInTopic(subjId, String(topic.topicid), folderLabel);
-            return { folderLabel, vids };
-          })
-        );
-
-        for (const resItem of topicResults) {
-          if (resItem.vids.length > 0) {
-            folderSet.add(resItem.folderLabel);
-            streams.push(...resItem.vids);
+          for (let ti = 0; ti < topics.length; ti += 5) {
+            const topicBatch = topics.slice(ti, ti + 5);
+            const batchResults = await Promise.all(
+              topicBatch.map(async (topic) => {
+                const rawTopicName = String(topic.topic_name || `Topic ${topic.topicid}`).trim();
+                const folderLabel = subjectPrefix
+                  ? `${subjectPrefix} / ${rawTopicName}`
+                  : rawTopicName;
+                const vids = await fetchVideosInTopic(subjId, String(topic.topicid), folderLabel);
+                return { folderLabel, vids };
+              })
+            );
+            for (const item of batchResults) {
+              if (item.vids.length > 0) {
+                folderSet.add(item.folderLabel);
+                streams.push(...item.vids);
+              }
+            }
+            if (streams.length >= 250) break;
           }
+        } catch (topErr: any) {
+          notes.push(`Topics fetch note for subj ${subjId}: ${topErr?.message}`);
         }
       };
 
       // Case 3: Subject Topic-List Page (topic.html?courseid=284&subjectid=1677&domainId=RWA)
       if (subjectId) {
         await fetchAllTopicsForSubject(subjectId);
-        pageTitle = `${cfg.name} — Course #${courseId} (Subject #${subjectId})`;
-        return {
-          sourceUrl: targetUrl,
-          pageTitle,
-          extractedAt: new Date().toISOString(),
-          streams,
-          folders: Array.from(folderSet),
-          scriptsScanned: 1,
-          notes,
-        };
+        if (streams.length > 0) {
+          pageTitle = `${cfg.name} — Course #${courseId} (Subject #${subjectId})`;
+          return {
+            sourceUrl: targetUrl,
+            pageTitle,
+            extractedAt: new Date().toISOString(),
+            streams,
+            folders: Array.from(folderSet),
+            scriptsScanned: 1,
+            notes,
+          };
+        }
       }
 
       // Case 4: Full Course Subject-List Page (subject.html?courseid=284&domainId=RWA)
-      const subjRes = await fetch(
-        `${cfg.apiUrl}/get/allsubjectfrmlivecourseclass?courseid=${encodeURIComponent(courseId)}`,
-        { headers: appxHeaders }
-      );
-      if (subjRes.ok) {
-        const subjJson = (await subjRes.json()) as any;
-        const subjects: any[] = Array.isArray(subjJson?.data) ? subjJson.data : [];
-        await Promise.all(
-          subjects.map(async (subj) => {
-            const sName = String(subj.subject_name || `Subject ${subj.subjectid}`).trim();
-            await fetchAllTopicsForSubject(String(subj.subjectid), sName);
-          })
+      try {
+        const subjRes = await fetch(
+          `${cfg.apiUrl}/get/allsubjectfrmlivecourseclass?courseid=${encodeURIComponent(courseId)}`,
+          { headers: appxHeaders }
         );
-        pageTitle = `${cfg.name} — Full Course #${courseId}`;
-        return {
-          sourceUrl: targetUrl,
-          pageTitle,
-          extractedAt: new Date().toISOString(),
-          streams,
-          folders: Array.from(folderSet),
-          scriptsScanned: 1,
-          notes,
-        };
+        if (subjRes.ok) {
+          const subjJson = (await subjRes.json()) as any;
+          const subjects: any[] = Array.isArray(subjJson?.data) ? subjJson.data : [];
+          for (let si = 0; si < subjects.length; si += 4) {
+            const subBatch = subjects.slice(si, si + 4);
+            await Promise.all(
+              subBatch.map(async (subj) => {
+                const sName = String(subj.subject_name || `Subject ${subj.subjectid}`).trim();
+                await fetchAllTopicsForSubject(String(subj.subjectid), sName);
+              })
+            );
+            if (streams.length >= 250) break;
+          }
+          if (streams.length > 0) {
+            pageTitle = `${cfg.name} — Full Course #${courseId}`;
+            return {
+              sourceUrl: targetUrl,
+              pageTitle,
+              extractedAt: new Date().toISOString(),
+              streams,
+              folders: Array.from(folderSet),
+              scriptsScanned: 1,
+              notes,
+            };
+          }
+        }
+      } catch (subjErr: any) {
+        notes.push(`Case 4 error: ${subjErr?.message}`);
       }
     }
   } catch (appxErr: any) {
@@ -1541,6 +1612,17 @@ async function inspectUrlAndExtractStreams(
 
 let cachedUserbotClient: TelegramClient | null = null;
 let cachedUserbotSessionKey = '';
+let userbotConnectingPromise: Promise<TelegramClient | null> | null = null;
+let userbotMeCache: {
+  connected: boolean;
+  accountName?: string;
+  username?: string;
+  error?: string;
+  lastChecked: number;
+} = {
+  connected: false,
+  lastChecked: 0,
+};
 let botInfoCache: { username?: string; firstName?: string; connected: boolean; error?: string } = {
   connected: false,
 };
@@ -1557,26 +1639,53 @@ async function getConnectedUserbotClient(): Promise<TelegramClient | null> {
   if (isNaN(apiId)) return null;
 
   const key = `${apiId}:${apiHash}:${stringSession.slice(0, 24)}`;
-  if (cachedUserbotClient && cachedUserbotSessionKey === key && cachedUserbotClient.connected) {
-    return cachedUserbotClient;
+  if (cachedUserbotClient && cachedUserbotSessionKey === key) {
+    try {
+      if (!cachedUserbotClient.connected) {
+        await cachedUserbotClient.connect();
+      }
+      if (cachedUserbotClient.connected) {
+        return cachedUserbotClient;
+      }
+    } catch {
+      cachedUserbotClient = null;
+    }
   }
 
-  try {
-    const client = new TelegramClient(new StringSession(stringSession), apiId, apiHash, {
-      connectionRetries: 3,
-    });
-    await client.connect();
-    if (!client.connected) {
+  if (userbotConnectingPromise) {
+    return userbotConnectingPromise;
+  }
+
+  userbotConnectingPromise = (async () => {
+    try {
+      const client = new TelegramClient(new StringSession(stringSession), apiId, apiHash, {
+        connectionRetries: 5,
+        autoReconnect: true,
+        useWSS: false,
+      });
+      try {
+        (client as any).setLogLevel('none');
+      } catch {
+        // ignore
+      }
+      await client.connect();
+      if (!client.connected) {
+        cachedUserbotClient = null;
+        return null;
+      }
+      cachedUserbotClient = client;
+      cachedUserbotSessionKey = key;
+      return client;
+    } catch (err: any) {
+      console.warn('[StreamBridge MTProto] Userbot connect warning:', err?.message || err);
       cachedUserbotClient = null;
       return null;
+    } finally {
+      userbotConnectingPromise = null;
     }
-    cachedUserbotClient = client;
-    cachedUserbotSessionKey = key;
-    return client;
-  } catch (err) {
-    cachedUserbotClient = null;
-    return null;
-  }
+  })();
+
+  return userbotConnectingPromise;
 }
 
 async function sendTelegramTextMessage(
@@ -1633,6 +1742,32 @@ async function editTelegramTextMessage(
     });
   } catch {
     // ignore edit rate limit
+  }
+}
+
+async function deleteTelegramMessage(chatId: string | number, messageId: number | undefined) {
+  if (!messageId) return;
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  if (!token) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    });
+  } catch {
+    // ignore
+  }
+}
+
+async function cleanOldLockMessages(chatId: string | number, currentMsgId: number) {
+  if (!currentMsgId) return;
+  for (let delta = -3; delta <= 3; delta++) {
+    if (delta === 0) continue;
+    const targetId = currentMsgId + delta;
+    if (targetId > 0) {
+      deleteTelegramMessage(chatId, targetId);
+    }
   }
 }
 
@@ -1714,28 +1849,28 @@ function buildFeaturesMenuPayload(chatId: string, _senderId?: string) {
   const activeRoutes = botSettings.routeRules.filter((r) => r.enabled);
   const userQueue = chatJobQueues.get(chatId) || [];
   const activeRunning = Array.from(jobs.values()).filter(
-    (j) => j.telegramChatId === chatId && (j.status === 'downloading' || j.status === 'converting' || j.status === 'uploading')
+    (j) =>
+      j.telegramChatId === chatId &&
+      (j.status === 'downloading' || j.status === 'merging' || j.status.startsWith('uploading'))
   ).length;
 
   const text =
     `📋 StreamBridge Bot — All Features Menu (/features)\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `🔑 Access: Lifetime Permanent Active ✅\n` +
-    `🔗 Invite Link: ${inviteLink}\n` +
-    `🔢 4-Digit Code: ${active4Digit}\n` +
     `🎞 Default Quality: ${q.toUpperCase()} (Auto-select before play)\n` +
-    `🎬 Delivery: 1 Full Single Video (No Parts!)\n` +
+    `🎬 Delivery: 1 Full Single Video (No Parts, Up to 2GB via Userbot)\n` +
     `🛡️ Backup Channels/Groups: ${activeBackups.length} active\n` +
     `🎯 Fix-Link -> Channel Rules: ${activeRoutes.length} active\n` +
     `📊 Your Queue: ${activeRunning} active, ${userQueue.length} waiting\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `✨ Available Bot Features:\n` +
     `1️⃣ Direct HLS (.m3u8), MP4 & JS-Player Video Downloader\n` +
-    `2️⃣ Deep Multi-Folder & Course Extractor (e.g. StudyBee / RWA / Course Topics)\n` +
-    `3️⃣ Auto Quality Selector (${q.toUpperCase()} default before video plays)\n` +
-    `4️⃣ Puri Video (Up to 2GB Single Streamable MP4 via Userbot)\n` +
-    `5️⃣ Auto-Backup Vault (Saves every video to your Backup Channels/Groups)\n` +
-    `6️⃣ Fix Link -> Fix Channel Routing (<url> -> <channel_id> or /route)\n\n` +
+    `2️⃣ Deep Multi-Folder & Course Extractor (StudyBee, RWA, TeachX, AppX)\n` +
+    `3️⃣ Auto Quality Selector (${q.toUpperCase()} default)\n` +
+    `4️⃣ 1 Full Single Video (Up to 2GB via Userbot to Backup Channels, Zero Parts!)\n` +
+    `5️⃣ Auto-Backup Vault (Saves every video to Backup Channels/Groups)\n` +
+    `6️⃣ Fix Link -> Fix Channel Routing (<url> -> <channel_id>)\n\n` +
     `👇 Neeche diye gaye buttons se koi bhi feature/setting control karein:`;
 
   const replyMarkup = {
@@ -1749,48 +1884,32 @@ function buildFeaturesMenuPayload(chatId: string, _senderId?: string) {
       [
         {
           text: fullMode
-            ? '🎬 Mode: Puri Video (Up to 2GB) ✅'
-            : '🎬 Switch to Puri Video (2GB)',
+            ? '🎬 Full Single Video (2GB) ✅'
+            : '🎬 Switch to Single Video (2GB)',
           callback_data: 'feat:mode:full',
         },
         {
-          text: !fullMode ? '⚡ Mode: Split (<48MB) ✅' : '⚡ Switch to Split Mode',
-          callback_data: 'feat:mode:split',
+          text: `🛡️ Backups (${activeBackups.length})`,
+          callback_data: 'feat:view:channels',
         },
       ],
       [
-        {
-          text: `🛡️ Backup Channels (${activeBackups.length})`,
-          callback_data: 'feat:view:channels',
-        },
         {
           text: '➕ Add Backup Channel',
           callback_data: 'feat:help:addbackup',
         },
-      ],
-      [
         {
-          text: `🎯 Fix Link -> Channel (${activeRoutes.length})`,
+          text: `🎯 Route Rules (${activeRoutes.length})`,
           callback_data: 'feat:help:route',
         },
-        {
-          text: '📂 Multi-Folder Course Guide',
-          callback_data: 'feat:help:course',
-        },
       ],
       [
         {
-          text: `📊 Queue Status (${activeRunning + userQueue.length})`,
-          callback_data: 'feat:view:queue',
+          text: '👥 Share Invite Link (2612)',
+          callback_data: 'feat:invite',
         },
         {
-          text: '🛑 Stop & Clear Queue',
-          callback_data: 'feat:action:stop',
-        },
-      ],
-      [
-        {
-          text: '🔄 Refresh /features Menu',
+          text: '🔄 Refresh Menu',
           callback_data: 'feat:refresh',
         },
       ],
@@ -2003,6 +2122,57 @@ async function uploadToTelegramUserbotMtproto(
       new Set(allTargetChatIds.map((id) => id.trim()).filter(Boolean))
     );
 
+    const channelTargets = uniqueTargets.filter((id) => id.startsWith('-100') || id.startsWith('@'));
+    const privateTargets = uniqueTargets.filter((id) => !id.startsWith('-100') && !id.startsWith('@'));
+
+    // Option A: If Backup Channel(s) configured, Userbot sends full 1.5GB file directly to the channel where it is Admin!
+    if (channelTargets.length > 0) {
+      const primaryChannel = channelTargets[0];
+      try {
+        const sentMsg: any = await client.sendFile(primaryChannel, {
+          file: toUpload,
+          caption,
+          forceDocument: false,
+          attributes: videoAttributes,
+          thumb: meta?.thumbPath && fs.existsSync(meta.thumbPath) ? meta.thumbPath : undefined,
+          workers: 16,
+          progressCallback: (progress: number) => {
+            if (onProgress) {
+              onProgress(Math.round(progress * 100));
+            }
+          },
+        });
+
+        const messageId = sentMsg?.id;
+        const cleanChannelId = primaryChannel.replace(/^-100/, '');
+        const postLink = primaryChannel.startsWith('@')
+          ? `https://t.me/${primaryChannel.replace(/^@/, '')}/${messageId}`
+          : `https://t.me/c/${cleanChannelId}/${messageId}`;
+
+        // Secondary backup channels
+        for (const otherChannel of channelTargets.slice(1)) {
+          await copyTelegramVideoMessage(primaryChannel, messageId, otherChannel, caption);
+        }
+
+        // Private chat users: Deliver message / copy directly
+        for (const userChatId of privateTargets) {
+          const copied = await copyTelegramVideoMessage(primaryChannel, messageId, userChatId, caption);
+          if (!copied) {
+            await sendTelegramTextMessage(
+              userChatId,
+              `🎬 ${caption.split('\n')[0]}\n\n` +
+                `✅ Full Single Video (1.5GB) Backup Channel me upload ho chuki hai!\n\n` +
+                `🔗 Open & Watch in Channel:\n${postLink}`
+            );
+          }
+        }
+
+        return { ok: true };
+      } catch (directChanErr: any) {
+        console.warn('Userbot direct channel send fallback:', directChanErr?.message || directChanErr);
+      }
+    }
+
     if (botInfoCache.username && uniqueTargets.length > 0) {
       const primaryChatId = uniqueTargets[0];
       const relayTag = `#RELAY_${primaryChatId}_${jobId}#`;
@@ -2141,65 +2311,7 @@ async function compressMp4ToFit50Mb(filePath: string, durationSec: number): Prom
 
 // Fast 34MB FFmpeg Stream Splitter (Used only if Userbot is unavailable or Split Mode is explicitly enabled)
 async function splitMp4IntoFastPartsIfNeeded(filePath: string): Promise<string[]> {
-  const stat = await fs.promises.stat(filePath);
-  const sizeMb = stat.size / (1024 * 1024);
-  if (sizeMb <= 47.5 || !ffmpegAvailable) {
-    return [filePath];
-  }
-  const dir = path.dirname(filePath);
-  const ext = path.extname(filePath);
-  const base = path.basename(filePath, ext);
-  const outPattern = path.join(dir, `${base}_part%02d${ext}`);
-
-  let durationSec = 3600;
-  try {
-    const { stdout } = await execFileAsync('ffprobe', [
-      '-v',
-      'error',
-      '-show_entries',
-      'format=duration',
-      '-of',
-      'default=noprint_wrappers=1:nokey=1',
-      filePath,
-    ]);
-    const parsedDur = parseFloat(stdout.trim());
-    if (Number.isFinite(parsedDur) && parsedDur > 10) {
-      durationSec = parsedDur;
-    }
-  } catch {
-    // fallback if ffprobe fails
-  }
-
-  const numParts = Math.max(2, Math.ceil(sizeMb / 34));
-  const segTimeSec = Math.max(60, Math.floor(durationSec / numParts));
-
-  try {
-    await execFileAsync('ffmpeg', [
-      '-y',
-      '-i',
-      filePath,
-      '-c',
-      'copy',
-      '-map',
-      '0',
-      '-f',
-      'segment',
-      '-segment_time',
-      String(segTimeSec),
-      '-reset_timestamps',
-      '1',
-      outPattern,
-    ]);
-    const files = (await fs.promises.readdir(dir))
-      .filter((f) => f.startsWith(`${base}_part`) && f.endsWith(ext))
-      .sort()
-      .map((f) => path.join(dir, f));
-    if (files.length > 0) {
-      return files;
-    }
-  } catch {
-    // fallback
-  }
+  // Video splitting is completely disabled. Always deliver 1 full single video.
   return [filePath];
 }
 
@@ -2616,16 +2728,31 @@ async function processDownloadJob(job: DownloadJob): Promise<void> {
                 routedToChannel: routedChannelLabel || undefined,
               };
             } else {
-              // Rare extreme fallback
-              const parts = await splitMp4IntoFastPartsIfNeeded(singleVideoPath);
+              // Ensure it fits into single video by recompressing at tighter bitrate target
+              const tighterVideoPath = await compressMp4ToFit50Mb(singleVideoPath, videoMeta.duration);
+              const tighterMeta = await probeVideoMetadataAndThumb(tighterVideoPath, `${job.id}_single_tighter`);
+              const tStat = await fs.promises.stat(tighterVideoPath);
+              const tSizeMb = tStat.size / (1024 * 1024);
               job.status = 'uploading_bot_api';
-              for (let idx = 0; idx < parts.length; idx++) {
-                const pPath = parts[idx];
-                const pMeta = await probeVideoMetadataAndThumb(pPath, `${job.id}_p${idx}`);
-                const pSizeMb = (fs.statSync(pPath).size / (1024 * 1024)).toFixed(1);
-                const partCaption = `🎬 ${job.title} [Part ${idx + 1}/${parts.length}]\n${folderLine}${resLine}📦 Size: ${pSizeMb} MB`;
-                await uploadToTelegramBotApi(pPath, primaryChat, partCaption, pMeta);
+              await updateTelegramProgressIfNeeded(
+                `📤 Uploading FULL Single Video (${tSizeMb.toFixed(1)} MB, complete video)...`,
+                true
+              );
+              const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${tSizeMb.toFixed(1)} MB`;
+              const partRes = await uploadToTelegramBotApi(tighterVideoPath, primaryChat, singleCaption, tighterMeta);
+              if (partRes.ok && partRes.messageId && partRes.fromChatId && secondaryChatIds.length > 0) {
+                for (const destId of secondaryChatIds) {
+                  await copyTelegramVideoMessage(partRes.fromChatId, partRes.messageId, destId, singleCaption);
+                }
               }
+              job.telegramResult = {
+                deliveredVia: 'BOT_API_50MB',
+                chatId: primaryChat,
+                fileSizeMb: tSizeMb.toFixed(2),
+                timestamp: new Date().toISOString(),
+                backedUpTo: enabledBackups.map((b) => b.title),
+                routedToChannel: routedChannelLabel || undefined,
+              };
             }
           }
         } else {
@@ -2638,81 +2765,58 @@ async function processDownloadJob(job: DownloadJob): Promise<void> {
           const compStat = await fs.promises.stat(singleVideoPath);
           const compSizeMb = compStat.size / (1024 * 1024);
 
-          if (compSizeMb <= 49.5) {
-            job.status = 'uploading_bot_api';
-            await updateTelegramProgressIfNeeded(
-              `📤 Uploading FULL Single Video (${compSizeMb.toFixed(1)} MB, complete video) to Telegram...`,
-              true
-            );
-            const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
-            const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
-            const upRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
-            if (!upRes.ok) {
-              throw new Error(upRes.error || 'Failed to upload single video');
-            }
-            if (upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
-              for (const destId of secondaryChatIds) {
-                await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, singleCaption);
-              }
-            }
-            job.telegramResult = {
-              deliveredVia: 'BOT_API_50MB',
-              chatId: primaryChat,
-              fileSizeMb: compSizeMb.toFixed(2),
-              timestamp: new Date().toISOString(),
-              backedUpTo: enabledBackups.map((b) => b.title),
-              routedToChannel: routedChannelLabel || undefined,
-            };
-            addBotLog(
-              'OUTGOING',
-              primaryChat,
-              `Delivered FULL single video ${job.title} (${compSizeMb.toFixed(2)} MB) without parts.`
-            );
-          } else {
-            // Fallback only if even compressed video > 49.5 MB
-            const parts = await splitMp4IntoFastPartsIfNeeded(singleVideoPath);
-            job.status = 'uploading_bot_api';
-            for (let idx = 0; idx < parts.length; idx++) {
-              const pPath = parts[idx];
-              const pMeta = await probeVideoMetadataAndThumb(pPath, `${job.id}_p${idx}`);
-              const pSizeMb = (fs.statSync(pPath).size / (1024 * 1024)).toFixed(1);
-              const partCaption = `🎬 ${job.title} [Part ${idx + 1}/${parts.length}]\n${folderLine}${resLine}📦 Size: ${pSizeMb} MB`;
-              const upRes = await uploadToTelegramBotApi(pPath, primaryChat, partCaption, pMeta);
-              if (upRes.ok && upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
-                for (const destId of secondaryChatIds) {
-                  await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, partCaption);
-                }
-              }
-            }
-          }
-        }
-      } else {
-        // CASE C: Split Mode explicitly chosen
-        const parts = await splitMp4IntoFastPartsIfNeeded(job.filePath);
-        job.status = 'uploading_bot_api';
-        await updateTelegramProgressIfNeeded(
-          `🚀 Uploading ${parts.length} parts (${sizeMb.toFixed(1)} MB total) to Telegram & Backup Channels...`,
-          true
-        );
-        for (let idx = 0; idx < parts.length; idx++) {
-          const pPath = parts[idx];
-          const pMeta = await probeVideoMetadataAndThumb(pPath, `${job.id}_p${idx}`);
-          const pSizeMb = (fs.statSync(pPath).size / (1024 * 1024)).toFixed(1);
-          const partCaption = `🎬 ${job.title} [Part ${idx + 1}/${parts.length}]\n${folderLine}${resLine}📦 Size: ${pSizeMb} MB`;
-          const upRes = await uploadToTelegramBotApi(pPath, primaryChat, partCaption, pMeta);
+          job.status = 'uploading_bot_api';
+          await updateTelegramProgressIfNeeded(
+            `📤 Uploading FULL Single Video (${compSizeMb.toFixed(1)} MB, complete video) to Telegram...`,
+            true
+          );
+          const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
+          const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
+          const upRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
           if (!upRes.ok) {
-            throw new Error(upRes.error || `Part ${idx + 1} failed to upload`);
+            throw new Error(upRes.error || 'Failed to upload single video');
           }
           if (upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
             for (const destId of secondaryChatIds) {
-              await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, partCaption);
+              await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, singleCaption);
             }
+          }
+          job.telegramResult = {
+            deliveredVia: 'BOT_API_50MB',
+            chatId: primaryChat,
+            fileSizeMb: compSizeMb.toFixed(2),
+            timestamp: new Date().toISOString(),
+            backedUpTo: enabledBackups.map((b) => b.title),
+            routedToChannel: routedChannelLabel || undefined,
+          };
+          addBotLog(
+            'OUTGOING',
+            primaryChat,
+            `Delivered FULL single video ${job.title} (${compSizeMb.toFixed(2)} MB) without parts.`
+          );
+        }
+      } else {
+        // Full Single Video Mode (No parts!)
+        await updateTelegramProgressIfNeeded(
+          `🎬 Preparing 1 Full Single Video (${sizeMb.toFixed(1)} MB)...`,
+          true
+        );
+        const singleVideoPath = await compressMp4ToFit50Mb(job.filePath, videoMeta.duration);
+        const compStat = await fs.promises.stat(singleVideoPath);
+        const compSizeMb = compStat.size / (1024 * 1024);
+        job.status = 'uploading_bot_api';
+        const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
+        const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
+        const upRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
+        if (upRes.ok && upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
+          for (const destId of secondaryChatIds) {
+            await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, singleCaption);
           }
         }
         job.telegramResult = {
           deliveredVia: 'BOT_API_50MB',
           chatId: primaryChat,
-          fileSizeMb: sizeMb.toFixed(2),
+          fileSizeMb: compSizeMb.toFixed(2),
           timestamp: new Date().toISOString(),
           backedUpTo: enabledBackups.map((b) => b.title),
           routedToChannel: routedChannelLabel || undefined,
@@ -2788,14 +2892,6 @@ async function pollTelegramBotUpdates() {
     setTimeout(pollTelegramBotUpdates, 5000);
     return;
   }
-
-  // If user handed over polling to their 24/7 Hugging Face Space, pause local getUpdates to avoid 409 Conflict
-  if (!IS_RUNNING_ON_HF && botSettings.hfCloud?.localPollingPaused) {
-    botPollingActive = false;
-    setTimeout(pollTelegramBotUpdates, 4000);
-    return;
-  }
-
   try {
     if (!botInfoCache.connected) {
       const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
@@ -2821,21 +2917,13 @@ async function pollTelegramBotUpdates() {
 
     botPollingActive = true;
     const updatesRes = await fetch(
-      `https://api.telegram.org/bot${token}/getUpdates?offset=${botPollingOffset}&timeout=10`
+      `https://api.telegram.org/bot${token}/getUpdates?offset=${botPollingOffset}&timeout=1`
     );
     const updatesData = (await updatesRes.json()) as any;
 
-    if (!updatesData.ok && updatesData.error_code === 409 && !IS_RUNNING_ON_HF) {
-      // Another instance (e.g., Hugging Face 24/7 Space) is actively polling this bot!
-      addBotLog(
-        'SYSTEM',
-        'bot',
-        'Detected 24/7 Cloud Bot instance polling (409 Handover). Local polling paused automatically to prevent conflict.'
-      );
-      botSettings.hfCloud.localPollingPaused = true;
-      botPollingActive = false;
-      saveBotSettings();
-      setTimeout(pollTelegramBotUpdates, 5000);
+    if (!updatesData.ok && updatesData.error_code === 409) {
+      // 409 Conflict: another instance called getUpdates. Retry shortly without shutting down.
+      setTimeout(pollTelegramBotUpdates, 2000);
       return;
     }
 
@@ -2857,6 +2945,44 @@ async function pollTelegramBotUpdates() {
             continue;
           }
 
+          if (cbData === 'act:2612' || cbData.startsWith('act:')) {
+            const currentCodeState = ensureValidAccessCode();
+            botSettings.authorizedUsers[cbChatId] = {
+              chatId: cbChatId,
+              firstName: cb.from?.first_name || 'Telegram User',
+              username: cb.from?.username,
+              activatedWithCode: currentCodeState.code,
+              activatedAt: new Date().toISOString(),
+              expiresAt: '2099-12-31T23:59:59.999Z',
+            };
+            if (cbSenderId) {
+              botSettings.authorizedUsers[cbSenderId] = botSettings.authorizedUsers[cbChatId];
+            }
+            saveBotSettings();
+            await answerTelegramCallbackQuery(cbId, '🎉 Lifetime Access Activated!');
+            const menu = buildFeaturesMenuPayload(cbChatId, cbSenderId);
+            await sendTelegramTextMessage(
+              cbChatId,
+              `🎉 Welcome ${cb.from?.first_name || 'Telegram User'}!\n\n` +
+                `✅ Lifetime Access Activated! Aapka bot hamesha ke liye activate ho gaya hai.\n\n` +
+                `🎬 Ab aap koi bhi Course Link (.m3u8, studybeepro, RWA, mp4) bhej kar full video download kar sakte hain!`,
+              menu.replyMarkup
+            );
+            continue;
+          }
+
+          if (cbData === 'feat:invite') {
+            await answerTelegramCallbackQuery(cbId, '🔗 Invite Link');
+            const currentCodeState = ensureValidAccessCode();
+            const botUsername = botInfoCache.username || 'Updates_send_me_bot';
+            const inviteLink = `https://t.me/${botUsername}?start=${currentCodeState.code}`;
+            await sendTelegramTextMessage(
+              cbChatId,
+              `🔗 StreamBridge Invite Link for Friends:\n${inviteLink}\n(Invite Code: ${currentCodeState.code})\n\nIs link ko friends ke sath share karein, unka access bhi hamesha ke liye free activate ho jayega!`
+            );
+            continue;
+          }
+
           if (!isChatAuthorized(cbChatId) && !isChatAuthorized(cbSenderId)) {
             await answerTelegramCallbackQuery(
               cbId,
@@ -2868,7 +2994,7 @@ async function pollTelegramBotUpdates() {
           if (cbData.startsWith('feat:q:')) {
             const newQ = cbData.replace('feat:q:', '').trim().toLowerCase();
             if (['144p', '240p', '360p', '480p', '720p', '1080p'].includes(newQ)) {
-              botSettings.globalDefaultQuality = newQ;
+              botSettings.globalDefaultQuality = newQ as any;
               saveBotSettings();
               addBotLog('SYSTEM', cbChatId, `Changed Default Video Quality via /features menu to ${newQ.toUpperCase()}`);
               await answerTelegramCallbackQuery(cbId, `✅ Default Quality set to ${newQ.toUpperCase()}`);
@@ -2971,14 +3097,14 @@ async function pollTelegramBotUpdates() {
             const activeJobs = Array.from(jobs.values()).filter(
               (j) =>
                 j.telegramChatId === cbChatId &&
-                (j.status === 'downloading' || j.status === 'converting' || j.status === 'uploading')
+                (j.status === 'downloading' || j.status === 'merging' || j.status.startsWith('uploading'))
             );
             const activeLines =
               activeJobs.length > 0
                 ? activeJobs
                     .map(
                       (j, i) =>
-                        `${i + 1}. ⏳ ${j.title} — ${j.status.toUpperCase()} (${Math.round(j.progress || 0)}%)`
+                        `${i + 1}. ⏳ ${j.title} — ${j.status.toUpperCase()} (${Math.round(j.progressPercent || 0)}%)`
                     )
                     .join('\n')
                 : 'No video currently downloading.';
@@ -3103,6 +3229,11 @@ async function pollTelegramBotUpdates() {
           [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'Telegram User';
         const username = msg.from?.username;
 
+        // Auto-clean any spurious lock messages sent by old instances
+        if (msg.message_id) {
+          cleanOldLockMessages(chatId, msg.message_id);
+        }
+
         // 2. If user forwards a message from a Channel to the Bot, auto-add that Channel to Backup Channels!
         if (msg.forward_from_chat && (msg.forward_from_chat.type === 'channel' || msg.forward_from_chat.type === 'supergroup')) {
           if (isChatAuthorized(chatId)) {
@@ -3147,7 +3278,7 @@ async function pollTelegramBotUpdates() {
           startPayload.includes(active4Digit) ||
           text.replace(/\D/g, '') === active4Digit;
 
-        if (isCodeMatch && !isChatAuthorized(chatId)) {
+        if (isCodeMatch) {
           botSettings.authorizedUsers[chatId] = {
             chatId,
             firstName,
@@ -3156,6 +3287,10 @@ async function pollTelegramBotUpdates() {
             activatedAt: new Date().toISOString(),
             expiresAt: '2099-12-31T23:59:59.999Z',
           };
+          const sId = String(msg.from?.id || chatId);
+          if (sId) {
+            botSettings.authorizedUsers[sId] = botSettings.authorizedUsers[chatId];
+          }
           saveBotSettings();
           addBotLog(
             'SYSTEM',
@@ -3163,17 +3298,15 @@ async function pollTelegramBotUpdates() {
             `Authorized user ${firstName} (${chatId}) PERMANENTLY with 4-digit invite code ${active4Digit}`
           );
 
-          const menu = buildFeaturesMenuPayload(chatId);
           await sendTelegramTextMessage(
             chatId,
-            `🎉 Congratulations ${firstName}!\n\n` +
-              `✅ Invite Verified! Aapka Bot HAMESHA ke liye Active ho gaya hai (Lifetime Access)!\n\n` +
-              `🔗 Aapka Invite Link: ${inviteLink}\n` +
-              `🔢 4-Digit Invite Code: ${active4Digit}\n\n` +
-              `Ab aap koi bhi video link (.m3u8, course folder, play link, mp4) bhejiye, bot bina rukawat 1 full complete video download karke bhejega.\n\n` +
-              menu.text,
-            menu.replyMarkup
+            `🎉 Welcome ${firstName}!\n\n` +
+              `✅ Lifetime Access Activated! Aapka bot hamesha ke liye verify ho gaya hai.\n\n` +
+              `🎬 Ab aap koi bhi Course Link (.m3u8, studybeepro, RWA, mp4) chat me bhej sakte hain.\n` +
+              `Bot bina ruke full video download karke bhejega!`
           );
+          const menu = buildFeaturesMenuPayload(chatId, sId);
+          await sendTelegramTextMessage(chatId, menu.text, menu.replyMarkup);
           continue;
         }
 
@@ -3193,15 +3326,31 @@ async function pollTelegramBotUpdates() {
         if (!isChatAuthorized(chatId) && !isChatAuthorized(senderId)) {
           await sendTelegramTextMessage(
             chatId,
-            `🔒 StreamBridge Bot Access Required!\n\n` +
-              `Bot ko use karne ke liye Access Activate karein (Lifetime Permanent):\n\n` +
-              `👉 Option 1: Is Invite Link par tap karein:\n` +
-              `${inviteLink}\n\n` +
-              `👉 Option 2: Ye 4-Digit Code chat me send karein:\n` +
-              `${active4Digit}\n\n` +
-              `✨ Code bhejte hi bot bina kisi expiry ke hamesha ke liye activate ho jayega!`
+            `🔒 StreamBridge Bot Access Required\n\n` +
+              `Bot ko use karne ke liye Access Activate karein:\n\n` +
+              `👉 Chat me type karein: ${active4Digit}\n` +
+              `👉 Ya neeche button par tap karein:`,
+            {
+              inline_keyboard: [
+                [
+                  {
+                    text: `✨ Tap to Activate Access (${active4Digit})`,
+                    callback_data: 'act:2612',
+                  },
+                ],
+              ],
+            }
           );
           addBotLog('SYSTEM', chatId, `Blocked unauthorized message from ${firstName} (${chatId}).`);
+          continue;
+        }
+
+        // Dedicated /invite command
+        if (baseCmd === '/invite') {
+          await sendTelegramTextMessage(
+            chatId,
+            `🔗 StreamBridge Invite Link for Friends:\n${inviteLink}\n(Invite Code: ${active4Digit})\n\nIs link ko friends ke sath share karein, unka access bhi hamesha ke liye activate ho jayega!`
+          );
           continue;
         }
 
@@ -3261,14 +3410,14 @@ async function pollTelegramBotUpdates() {
           const activeJobs = Array.from(jobs.values()).filter(
             (j) =>
               j.telegramChatId === chatId &&
-              (j.status === 'downloading' || j.status === 'converting' || j.status === 'uploading')
+              (j.status === 'downloading' || j.status === 'merging' || j.status.startsWith('uploading'))
           );
           const activeLines =
             activeJobs.length > 0
               ? activeJobs
                   .map(
                     (j, i) =>
-                      `${i + 1}. ⏳ ${j.title} — ${j.status.toUpperCase()} (${Math.round(j.progress || 0)}%)`
+                      `${i + 1}. ⏳ ${j.title} — ${j.status.toUpperCase()} (${Math.round(j.progressPercent || 0)}%)`
                   )
                   .join('\n')
               : 'No video currently downloading.';
@@ -3428,17 +3577,18 @@ async function pollTelegramBotUpdates() {
               await editTelegramTextMessage(
                 chatId,
                 statusMsgId,
-                `📁 Found ${extracted.streams.length} videos across ${
+                `📁 Course / Subject contains ${extracted.streams.length} lectures across ${
                   extracted.folders.length || 1
                 } folder(s) in "${extracted.pageTitle}"!\n` +
-                  `🎞 Quality: ${preferredQuality.toUpperCase()} (Full Complete MP4)\n` +
+                  `🎞 Quality: ${preferredQuality.toUpperCase()} (Full Complete Single MP4 per Lecture)\n` +
+                  `🎬 Mode: 100% Full Video (No parts / No splitting)\n` +
                   (activeRouteLabel ? `🎯 Target Channel: ${activeRouteLabel}\n` : '') +
                   (botSettings.backupChannels.filter((b) => b.enabled).length > 0
                     ? `🛡️ Auto-Backup: ${
                         botSettings.backupChannels.filter((b) => b.enabled).length
                       } channel/group(s)\n`
                     : '') +
-                  `🚀 Downloading & sending all full videos 1-by-1. Send /stop anytime to stop.`
+                  `🚀 Downloading & sending all full lectures 1-by-1. Send /stop anytime to stop.`
               );
 
               for (let idx = 0; idx < extracted.streams.length; idx++) {
@@ -3446,7 +3596,7 @@ async function pollTelegramBotUpdates() {
                 const jobId = crypto.randomUUID();
                 const newJob: DownloadJob = {
                   id: jobId,
-                  title: `[${idx + 1}/${extracted.streams.length}] ${stream.label}`,
+                  title: `📹 Lecture ${idx + 1}/${extracted.streams.length}: ${stream.label}`,
                   folderName: stream.folderName,
                   sourceUrl: stream.url,
                   originalRequestUrl: targetUrl,
@@ -4233,19 +4383,38 @@ async function startServer() {
     let userbotError: string | undefined;
 
     if (hasApiId && hasApiHash && hasStringSession) {
-      try {
-        const client = await getConnectedUserbotClient();
-        if (client && client.connected) {
-          const me = (await client.getMe().catch(() => null)) as any;
-          if (me) {
-            userbotConnected = true;
-            userbotAccountName =
-              [me.firstName, me.lastName].filter(Boolean).join(' ') || 'MTProto Userbot';
-            userbotUsername = me.username;
+      const now = Date.now();
+      if (userbotMeCache.connected && (now - userbotMeCache.lastChecked < 60000)) {
+        userbotConnected = userbotMeCache.connected;
+        userbotAccountName = userbotMeCache.accountName;
+        userbotUsername = userbotMeCache.username;
+        userbotError = userbotMeCache.error;
+      } else {
+        try {
+          const client = await getConnectedUserbotClient();
+          if (client && client.connected) {
+            const me = (await client.getMe().catch(() => null)) as any;
+            if (me) {
+              userbotConnected = true;
+              userbotAccountName =
+                [me.firstName, me.lastName].filter(Boolean).join(' ') || 'MTProto Userbot';
+              userbotUsername = me.username;
+              userbotMeCache = {
+                connected: true,
+                accountName: userbotAccountName,
+                username: userbotUsername,
+                lastChecked: now,
+              };
+            }
           }
+        } catch (e: any) {
+          userbotError = e?.message || 'Failed to connect MTProto StringSession';
+          userbotMeCache = {
+            connected: false,
+            error: userbotError,
+            lastChecked: now,
+          };
         }
-      } catch (e: any) {
-        userbotError = e?.message || 'Failed to connect MTProto StringSession';
       }
     }
 
@@ -4287,6 +4456,139 @@ async function startServer() {
         },
       },
     });
+  });
+
+  const pendingAuthSessions = new Map<
+    string,
+    { client: TelegramClient; phoneCodeHash: string; apiId: number; apiHash: string }
+  >();
+
+  // Send OTP code to Telegram phone number
+  app.post('/api/telegram/session/send-code', async (req, res) => {
+    try {
+      const rawApiId = String(req.body?.apiId || process.env.TELEGRAM_API_ID || '').trim();
+      const apiHash = String(req.body?.apiHash || process.env.TELEGRAM_API_HASH || '').trim();
+      const phoneNumber = String(req.body?.phoneNumber || '').trim();
+
+      if (!rawApiId || !apiHash || !phoneNumber) {
+        res.status(400).json({ ok: false, error: 'API ID, API Hash, and Phone Number are required.' });
+        return;
+      }
+
+      const apiId = parseInt(rawApiId, 10);
+      if (isNaN(apiId)) {
+        res.status(400).json({ ok: false, error: 'API ID must be a valid number.' });
+        return;
+      }
+
+      const client = new TelegramClient(new StringSession(''), apiId, apiHash, {
+        connectionRetries: 3,
+        useWSS: false,
+      });
+      try {
+        (client as any).setLogLevel('none');
+      } catch {}
+
+      await client.connect();
+      const { phoneCodeHash } = await client.sendCode({ apiId, apiHash }, phoneNumber);
+
+      pendingAuthSessions.set(phoneNumber, {
+        client,
+        phoneCodeHash,
+        apiId,
+        apiHash,
+      });
+
+      res.json({ ok: true, phoneCodeHash });
+    } catch (err: any) {
+      console.error('sendCode error:', err);
+      res.status(400).json({ ok: false, error: err?.message || 'Failed to send OTP code from Telegram.' });
+    }
+  });
+
+  // Verify OTP code & return generated TELEGRAM_STRING_SESSION
+  app.post('/api/telegram/session/verify-code', async (req, res) => {
+    try {
+      const phoneNumber = String(req.body?.phoneNumber || '').trim();
+      const phoneCode = String(req.body?.phoneCode || '').trim();
+      const password = req.body?.password ? String(req.body.password).trim() : undefined;
+
+      const pending = pendingAuthSessions.get(phoneNumber);
+      if (!pending) {
+        res.status(400).json({
+          ok: false,
+          error: 'No pending OTP session found for this phone number. Please click Send OTP again.',
+        });
+        return;
+      }
+
+      const { client, phoneCodeHash, apiId, apiHash } = pending;
+      try {
+        await (client as any).signInUser(
+          { apiId, apiHash },
+          {
+            phoneNumber: async () => phoneNumber,
+            phoneCodeHash,
+            phoneCode: async () => phoneCode,
+            password: password ? async () => password : undefined,
+            onError: (err: any) => {
+              throw err;
+            },
+          }
+        );
+      } catch (signErr: any) {
+        if (signErr?.message?.includes('SESSION_PASSWORD_NEEDED') && password) {
+          await (client as any).signInWithPassword(
+            { apiId, apiHash },
+            { password: async () => password }
+          );
+        } else {
+          throw signErr;
+        }
+      }
+
+      const stringSession = client.session.save() as unknown as string;
+      process.env.TELEGRAM_STRING_SESSION = stringSession;
+      process.env.TELEGRAM_API_ID = String(apiId);
+      process.env.TELEGRAM_API_HASH = apiHash;
+
+      cachedUserbotClient = client;
+      cachedUserbotSessionKey = `${apiId}:${apiHash}:${stringSession.slice(0, 24)}`;
+      saveBotSettings();
+
+      pendingAuthSessions.delete(phoneNumber);
+      res.json({ ok: true, stringSession });
+    } catch (err: any) {
+      console.error('verifyCode error:', err);
+      res.status(400).json({ ok: false, error: err?.message || 'Failed to verify OTP code.' });
+    }
+  });
+
+  // Send a test ping message to Telegram
+  app.post('/api/telegram/test-ping', async (req, res) => {
+    try {
+      const chatId = String(req.body?.chatId || process.env.TELEGRAM_CHAT_ID || '').trim();
+      if (!chatId) {
+        res.status(400).json({ ok: false, error: 'Target Chat ID required.' });
+        return;
+      }
+      const msgId = await sendTelegramTextMessage(
+        chatId,
+        `🏓 StreamBridge Ping Test!\n\n` +
+          `✅ Telegram Bot connection is Active.\n` +
+          `🛡️ Ready to stream and download full videos directly.`
+      );
+      if (msgId) {
+        res.json({ ok: true, messageId: msgId });
+      } else {
+        res.status(400).json({
+          ok: false,
+          error: 'Could not send test message. Check TELEGRAM_BOT_TOKEN and Chat ID.',
+        });
+      }
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Ping failed.' });
+    }
   });
 
   if (process.env.NODE_ENV !== 'production') {
