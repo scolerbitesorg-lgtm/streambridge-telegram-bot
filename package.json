@@ -4,8 +4,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
-    "start": "tsx server.ts",
+    "dev": "NODE_OPTIONS='--dns-result-order=ipv4first' tsx server.ts",
+    "start": "NODE_OPTIONS='--dns-result-order=ipv4first' tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
