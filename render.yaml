@@ -9,4 +9,4 @@ services:
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: 7860
+        value: 10000
