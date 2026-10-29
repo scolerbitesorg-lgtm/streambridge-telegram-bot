@@ -14,6 +14,14 @@ import { CustomFile } from 'telegram/client/uploads.js';
 
 dotenv.config();
 
+process.on('uncaughtException', (err) => {
+  console.error('[StreamBridge] Uncaught Exception caught (process guarded):', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[StreamBridge] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 const execFileAsync = promisify(execFile);
 
 const DOWNLOAD_DIR = path.join(os.tmpdir(), 'streambridge-downloads');
