@@ -1297,12 +1297,42 @@ export default function App() {
           <div className="pt-4 border-t border-slate-800 space-y-3">
             <div className="space-y-1">
               <div className="text-xs font-mono text-emerald-400 font-semibold">
-                OPTION B (IF YOUR HUGGING FACE ACCOUNT IS NEW / UNDER 30 DAYS OLD): 1-CLICK GITHUB → RENDER.COM (100% FREE, NO CARD)
+                OPTION B (READY &amp; PUSHED TO YOUR GITHUB): 1-CLICK GITHUB → RENDER.COM (100% FREE, NO CARD, ZERO TYPING)
               </div>
               <p className="text-xs text-slate-400">
-                Hugging Face ne naye accounts par Docker Spaces ke liye PRO ($9) aur ZeroGPU ke liye <strong>30-days old account</strong> rule laga diya hai. Agar aapka HF account naya hai, to yahan apna free <strong className="text-white">GitHub Token (ghp_...)</strong> dalein — ye pura code aapke GitHub par push karke <strong className="text-emerald-400">Render.com 1-Click Free Deploy</strong> link de dega (Render par koi Card ya 30-din wait nahi lagta!):
+                Aapka pura bot code, Dockerfile, aur encrypted 5-Secrets Vault aapke GitHub (<strong className="text-white">{hfCloud?.githubRepoUrl || 'scolerbitesorg-lgtm/streambridge-telegram-bot'}</strong>) par push ho chuka hai! Ab bas neeche <strong className="text-emerald-400">🚀 1-Click Launch Free on Render.com</strong> button par click karein — wahan koi form ya secret bharne ki zaroorat nahi hai, bas <strong className="text-white">Apply</strong> dabayein!
               </p>
             </div>
+
+            {(ghDeployResult?.renderDeployUrl || hfCloud?.renderDeployUrl) && (
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/40 flex flex-wrap items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="text-xs font-mono font-bold text-emerald-300">
+                    ✅ GitHub Repo Live &amp; Pre-Configured with All 5 Telegram/Userbot Secrets!
+                  </div>
+                  <div className="text-xs font-mono text-slate-300">
+                    Repo:{' '}
+                    <a
+                      href={ghDeployResult?.repoUrl || hfCloud?.githubRepoUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-sky-400 underline"
+                    >
+                      {ghDeployResult?.repoUrl || hfCloud?.githubRepoUrl}
+                    </a>
+                  </div>
+                </div>
+                <a
+                  href={ghDeployResult?.renderDeployUrl || hfCloud?.renderDeployUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-5 py-2.5 rounded-lg bg-emerald-400 text-slate-950 text-xs font-bold flex items-center gap-2 hover:bg-emerald-300 transition-colors shadow-lg"
+                >
+                  🚀 1-Click Launch Free on Render.com (No Secrets to Type!)
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+              </div>
+            )}
 
             <form onSubmit={handleDeployToGitHubRender} className="grid grid-cols-1 md:grid-cols-12 gap-3">
               <div className="md:col-span-9">
@@ -1321,32 +1351,10 @@ export default function App() {
                   className="w-full px-4 py-2.5 text-xs font-semibold bg-emerald-400 text-slate-950 rounded-lg hover:bg-emerald-300 disabled:opacity-50 transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <Server className="w-3.5 h-3.5" />
-                  {isDeployingGh ? 'Pushing to GitHub...' : '1-Click Push to GitHub + Render'}
+                  {isDeployingGh ? 'Pushing to GitHub...' : 'Re-Push Latest Changes to GitHub'}
                 </button>
               </div>
             </form>
-
-            {ghDeployResult && (
-              <div
-                className={`p-3.5 rounded-lg border text-xs font-mono flex flex-wrap items-center justify-between gap-3 ${
-                  ghDeployResult.ok
-                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                    : 'bg-red-500/10 border-red-500/30 text-red-300'
-                }`}
-              >
-                <span>{ghDeployResult.message}</span>
-                {ghDeployResult.renderDeployUrl && (
-                  <a
-                    href={ghDeployResult.renderDeployUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-3 py-1.5 rounded bg-emerald-400 text-slate-950 font-semibold flex items-center gap-1 hover:bg-emerald-300"
-                  >
-                    🚀 Launch Free on Render.com <ExternalLink className="w-3 h-3" />
-                  </a>
-                )}
-              </div>
-            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono pt-1">
