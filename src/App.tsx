@@ -551,24 +551,24 @@ export default function App() {
           <div className="lg:col-span-7 border border-slate-800 bg-[#111827] rounded-xl p-6 flex flex-col justify-between space-y-6">
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-2 text-xs font-mono text-amber-400">
+                <div className="flex items-center gap-2 text-xs font-mono text-emerald-400">
                   <KeyRound className="w-4 h-4" />
-                  <span>TELEGRAM BOT ACCESS GATE · ANTI-UNAUTHORIZED PROTECTION</span>
+                  <span>PERMANENT INVITE-TO-ACCESS SYSTEM (LIFETIME ACTIVE)</span>
                 </div>
                 <span className="text-xs font-mono text-emerald-400 flex items-center gap-1">
-                  <Clock className="w-3.5 h-3.5" />
-                  {formatRemainingTime(currentCodeExpiry)}
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Lifetime Access
                 </span>
               </div>
               <h2 className="text-xl font-bold text-white tracking-tight">
-                Unique Bot Activation Code
+                4-Digit Invite Code &amp; Instant Invite Link
               </h2>
               <p className="text-xs text-slate-400">
-                Koi bhi random user bot ko access nahi kar payega. Neeche button ke andar generate hua code copy karke Telegram bot (<strong className="text-slate-200">@{botUsername}</strong>) me bhejein tabhi bot us account ke liye active hoga.
+                User bina invite ke bot start nahi kar payega. User is <strong className="text-slate-200">Invite Link</strong> par tap karega ya chat me <strong className="text-amber-400 font-mono">4-digit code ({currentCode})</strong> paste karega, bot uske liye <strong className="text-emerald-400">HAMESHA ke liye (Lifetime)</strong> activate ho jayega!
               </p>
             </div>
 
-            {/* Interactive Unique Code Button Box */}
+            {/* Interactive 4-Digit Code Box */}
             <div className="space-y-3">
               <button
                 type="button"
@@ -577,9 +577,9 @@ export default function App() {
               >
                 <div className="text-left">
                   <div className="text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                    Active Unlock Code ({currentCodeLabel}) — Click to Copy
+                    Active 4-Digit Chat Code (Lifetime) — Click to Copy
                   </div>
-                  <div className="text-2xl sm:text-3xl font-mono font-bold tracking-widest text-amber-400 mt-1">
+                  <div className="text-3xl font-mono font-bold tracking-widest text-amber-400 mt-1">
                     {currentCode}
                   </div>
                 </div>
@@ -592,51 +592,45 @@ export default function App() {
                   ) : (
                     <>
                       <Copy className="w-4 h-4" />
-                      Copy Code
+                      Copy 4-Digit Code
                     </>
                   )}
                 </div>
               </button>
 
-              {/* Expiry Duration Selector + Generate New Code Button */}
-              <div className="pt-2 space-y-2.5">
-                <div className="text-xs font-medium text-slate-300">
-                  Select Code Validity Time &amp; Generate New Code:
+              {/* Instant Invite Link Box */}
+              <div className="p-3.5 rounded-xl bg-slate-900/90 border border-sky-500/30 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[11px] font-medium text-slate-400">
+                    Direct Invite Link (Automatic 1-Tap Lifetime Unlock):
+                  </div>
+                  <div className="text-xs font-mono text-sky-300 truncate mt-0.5">
+                    {`https://t.me/${botUsername}?start=${currentCode}`}
+                  </div>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {DURATION_OPTIONS.map((opt) => {
-                    const active = selectedDuration === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        type="button"
-                        onClick={() => {
-                          setSelectedDuration(opt.key);
-                          handleGenerateAccessCode(opt.key);
-                        }}
-                        disabled={isGeneratingCode}
-                        className={`px-3 py-2 rounded-lg text-xs font-mono font-medium border transition-colors cursor-pointer ${
-                          active
-                            ? 'bg-sky-500/15 border-sky-400 text-sky-300'
-                            : 'bg-slate-900/90 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
                 <button
                   type="button"
-                  onClick={() => handleGenerateAccessCode(selectedDuration)}
-                  disabled={isGeneratingCode}
-                  className="w-full py-2.5 px-4 rounded-lg bg-sky-400 hover:bg-sky-300 text-slate-950 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                  onClick={() => {
+                    navigator.clipboard.writeText(`https://t.me/${botUsername}?start=${currentCode}`);
+                    setCopiedCode(true);
+                    setTimeout(() => setCopiedCode(false), 2000);
+                  }}
+                  className="px-3.5 py-2 rounded-lg bg-sky-500/20 border border-sky-400/40 text-sky-300 hover:bg-sky-500 hover:text-slate-950 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0 cursor-pointer"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingCode ? 'animate-spin' : ''}`} />
-                  Generate New Unique Code ({DURATION_OPTIONS.find((d) => d.key === selectedDuration)?.label})
+                  <Copy className="w-3.5 h-3.5" />
+                  Copy Link
                 </button>
               </div>
+
+              <button
+                type="button"
+                onClick={() => handleGenerateAccessCode('30d')}
+                disabled={isGeneratingCode}
+                className="w-full py-2.5 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold text-xs transition-colors flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingCode ? 'animate-spin' : ''}`} />
+                Generate New 4-Digit Code
+              </button>
             </div>
 
             {/* Active Authorized Telegram Accounts */}
