@@ -129,6 +129,8 @@ export interface HuggingFaceCloudStatus {
   deployedRepoId?: string;
   deployedSpaceUrl?: string;
   deployedAppUrl?: string;
+  githubRepoUrl?: string;
+  renderDeployUrl?: string;
   lastDeployedAt?: string;
   autoPingEnabled: boolean;
   localPollingPaused: boolean;
