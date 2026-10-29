@@ -10,13 +10,3 @@ services:
         value: production
       - key: PORT
         value: 7860
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_API_ID
-        sync: false
-      - key: TELEGRAM_API_HASH
-        sync: false
-      - key: TELEGRAM_STRING_SESSION
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
