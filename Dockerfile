@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 # Install ffmpeg, ffprobe, and SSL certificates for HLS/MP4 downloading & Telegram MTProto
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -7,27 +7,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user required by Hugging Face Spaces (UID 1000)
-RUN useradd -m -u 1000 user || true
-USER user
-ENV HOME=/home/user \
-    PATH=/home/user/.local/bin:$PATH \
-    NODE_ENV=production \
-    PORT=7860
-
-WORKDIR $HOME/app
+WORKDIR /app
 
 # Copy package manifests first
-COPY --chown=user:user package*.json ./
+COPY package*.json ./
 
-# Install all dependencies (including tsx and vite for building)
-RUN npm install --include=dev
+# Install all dependencies (including devDependencies like tsx and vite)
+RUN npm install --include=dev --legacy-peer-deps
 
 # Copy full application source
-COPY --chown=user:user . .
+COPY . .
 
-# Build the React status dashboard
+# Build the React status dashboard before setting NODE_ENV=production
 RUN npm run build
+
+# Set runtime environment variables after build completes
+ENV NODE_ENV=production \
+    PORT=7860
+
+# Ensure full read/write permissions for bot-config.json and temp downloads
+RUN chmod -R 777 /app
 
 EXPOSE 7860
 
