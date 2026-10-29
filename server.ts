@@ -3363,7 +3363,7 @@ startCloudKeepAliveLoop();
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = Number(process.env.PORT) || (process.env.NODE_ENV === 'production' ? 10000 : 3000);
 
   app.use(express.json({ limit: '10mb' }));
 
@@ -4060,9 +4060,21 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const mainServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`StreamBridge Bot Status Server running on http://0.0.0.0:${PORT}`);
   });
+
+  // Render health check fallback: also listen on port 10000 if PORT is set to something else
+  if (PORT !== 10000 && (process.env.NODE_ENV === 'production' || process.env.RENDER)) {
+    try {
+      const auxServer = app.listen(10000, '0.0.0.0', () => {
+        console.log(`Auxiliary Render health check listener running on http://0.0.0.0:10000`);
+      });
+      auxServer.on('error', () => {});
+    } catch {
+      // ignore
+    }
+  }
 }
 
 startServer();
