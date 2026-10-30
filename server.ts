@@ -2311,7 +2311,68 @@ async function compressMp4ToFit50Mb(filePath: string, durationSec: number): Prom
 
 // Fast 34MB FFmpeg Stream Splitter (Used only if Userbot is unavailable or Split Mode is explicitly enabled)
 async function splitMp4IntoFastPartsIfNeeded(filePath: string): Promise<string[]> {
-  // Video splitting is completely disabled. Always deliver 1 full single video.
+  try {
+    const stat = await fs.promises.stat(filePath);
+    const sizeMb = stat.size / (1024 * 1024);
+    if (sizeMb <= 47.5 || !ffmpegAvailable) {
+      return [filePath];
+    }
+
+    const dir = path.dirname(filePath);
+    const ext = path.extname(filePath);
+    const base = path.basename(filePath, ext);
+    const outPattern = path.join(dir, `${base}_part%02d${ext}`);
+
+    let durationSec = 3600;
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        filePath,
+      ]);
+      const parsedDur = parseFloat((stdout || '').trim());
+      if (Number.isFinite(parsedDur) && parsedDur > 10) {
+        durationSec = parsedDur;
+      }
+    } catch {
+      // fallback
+    }
+
+    const numParts = Math.max(2, Math.ceil(sizeMb / 42));
+    const segTimeSec = Math.max(60, Math.floor(durationSec / numParts));
+
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i',
+      filePath,
+      '-c',
+      'copy',
+      '-map',
+      '0',
+      '-f',
+      'segment',
+      '-segment_time',
+      String(segTimeSec),
+      '-reset_timestamps',
+      '1',
+      outPattern,
+    ]);
+
+    const files = (await fs.promises.readdir(dir))
+      .filter((f) => f.startsWith(`${base}_part`) && f.endsWith(ext))
+      .sort()
+      .map((f) => path.join(dir, f));
+
+    if (files.length > 0) {
+      return files;
+    }
+  } catch (err: any) {
+    console.warn('[StreamBridge] Fast split error:', err?.message || err);
+  }
   return [filePath];
 }
 
@@ -2657,134 +2718,94 @@ async function processDownloadJob(job: DownloadJob): Promise<void> {
           primaryChat,
           `Delivered FULL video ${job.title} (${sizeMb.toFixed(2)} MB) to ${allDestChatIds.length} destination(s).`
         );
-      } else if (botSettings.preferFullSingleVideo && hasUserbotConfigured) {
-        // CASE B: Video > 49 MB & Full Single Video Mode (Default)
-        if (hasUserbotConfigured) {
-          job.status = 'uploading_mtproto_userbot';
-          await updateTelegramProgressIfNeeded(
-            `📤 Uploading FULL Single Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot ( + ${
-              enabledBackups.length
-            } Backup Channel)...`,
-            true
-          );
-          const upRes = await uploadToTelegramUserbotMtproto(
-            job.id,
-            job.filePath,
-            allDestChatIds,
-            caption,
-            videoMeta,
-            (pct) => {
-              job.progressPercent = Math.min(99, 95 + Math.round(pct * 0.04));
-              updateTelegramProgressIfNeeded(
-                `📤 Uploading FULL Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot: ${pct}%...`
-              );
-            }
-          );
+      } else {
+        // CASE B: Large Video (> 49 MB)
+        let deliveredViaUserbot = false;
 
-          if (upRes.ok) {
-            job.telegramResult = {
-              deliveredVia: 'MTPROTO_USERBOT_2GB',
-              chatId: primaryChat,
-              fileSizeMb: sizeMb.toFixed(2),
-              timestamp: new Date().toISOString(),
-              backedUpTo: enabledBackups.map((b) => b.title),
-              routedToChannel: routedChannelLabel || undefined,
-            };
-            addBotLog(
-              'USERBOT_MTPROTO',
-              primaryChat,
-              `Delivered FULL single video ${job.title} (${sizeMb.toFixed(2)} MB) via 2GB Userbot.`
-            );
-          } else {
-            // If Userbot fails, optimize into 1 single complete MP4 without parts
+        // Step 1: Attempt MTProto Userbot upload if configured
+        if (hasUserbotConfigured) {
+          try {
+            job.status = 'uploading_mtproto_userbot';
             await updateTelegramProgressIfNeeded(
-              `🎬 Userbot unavailable. Optimizing into 1 Full Single Video (No parts)...`,
+              `📤 Uploading FULL Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot...`,
               true
             );
-            const singleVideoPath = await compressMp4ToFit50Mb(job.filePath, videoMeta.duration);
-            const compStat = await fs.promises.stat(singleVideoPath);
-            const compSizeMb = compStat.size / (1024 * 1024);
+            const upRes = await uploadToTelegramUserbotMtproto(
+              job.id,
+              job.filePath,
+              allDestChatIds,
+              caption,
+              videoMeta,
+              (pct) => {
+                job.progressPercent = Math.min(99, 95 + Math.round(pct * 0.04));
+                updateTelegramProgressIfNeeded(
+                  `📤 Uploading FULL Video (${sizeMb.toFixed(1)} MB) via 2GB Userbot: ${pct}%...`
+                );
+              }
+            );
 
-            if (compSizeMb <= 49.5) {
-              job.status = 'uploading_bot_api';
-              await updateTelegramProgressIfNeeded(
-                `📤 Uploading FULL Single Video (${compSizeMb.toFixed(1)} MB, complete video)...`,
-                true
-              );
-              const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
-              const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
-              const partRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
-              if (partRes.ok && partRes.messageId && partRes.fromChatId && secondaryChatIds.length > 0) {
-                for (const destId of secondaryChatIds) {
-                  await copyTelegramVideoMessage(partRes.fromChatId, partRes.messageId, destId, singleCaption);
-                }
-              }
+            if (upRes.ok) {
+              deliveredViaUserbot = true;
               job.telegramResult = {
-                deliveredVia: 'BOT_API_50MB',
+                deliveredVia: 'MTPROTO_USERBOT_2GB',
                 chatId: primaryChat,
-                fileSizeMb: compSizeMb.toFixed(2),
+                fileSizeMb: sizeMb.toFixed(2),
                 timestamp: new Date().toISOString(),
                 backedUpTo: enabledBackups.map((b) => b.title),
                 routedToChannel: routedChannelLabel || undefined,
               };
-            } else {
-              // Ensure it fits into single video by recompressing at tighter bitrate target
-              const tighterVideoPath = await compressMp4ToFit50Mb(singleVideoPath, videoMeta.duration);
-              const tighterMeta = await probeVideoMetadataAndThumb(tighterVideoPath, `${job.id}_single_tighter`);
-              const tStat = await fs.promises.stat(tighterVideoPath);
-              const tSizeMb = tStat.size / (1024 * 1024);
-              job.status = 'uploading_bot_api';
-              await updateTelegramProgressIfNeeded(
-                `📤 Uploading FULL Single Video (${tSizeMb.toFixed(1)} MB, complete video)...`,
-                true
+              addBotLog(
+                'USERBOT_MTPROTO',
+                primaryChat,
+                `Delivered FULL single video ${job.title} (${sizeMb.toFixed(2)} MB) via 2GB Userbot.`
               );
-              const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${tSizeMb.toFixed(1)} MB`;
-              const partRes = await uploadToTelegramBotApi(tighterVideoPath, primaryChat, singleCaption, tighterMeta);
-              if (partRes.ok && partRes.messageId && partRes.fromChatId && secondaryChatIds.length > 0) {
-                for (const destId of secondaryChatIds) {
-                  await copyTelegramVideoMessage(partRes.fromChatId, partRes.messageId, destId, singleCaption);
-                }
-              }
-              job.telegramResult = {
-                deliveredVia: 'BOT_API_50MB',
-                chatId: primaryChat,
-                fileSizeMb: tSizeMb.toFixed(2),
-                timestamp: new Date().toISOString(),
-                backedUpTo: enabledBackups.map((b) => b.title),
-                routedToChannel: routedChannelLabel || undefined,
-              };
             }
+          } catch (ubErr: any) {
+            console.warn('[StreamBridge] Userbot upload error:', ubErr?.message || ubErr);
           }
-        } else {
-          // Userbot not configured: Optimize to 1 Full Single Video (No parts!)
+        }
+
+        // Step 2: If Userbot unavailable or failed, split into fast 48MB HD Lossless Parts (-c copy) & upload via Bot API!
+        if (!deliveredViaUserbot) {
           await updateTelegramProgressIfNeeded(
-            `🎬 Preparing 1 Full Single Video (${sizeMb.toFixed(1)} MB) without parts...`,
+            `⚡ Video is ${sizeMb.toFixed(1)} MB (>50MB Bot limit). Preparing fast HD Lossless Parts (<48MB each)...`,
             true
           );
-          const singleVideoPath = await compressMp4ToFit50Mb(job.filePath, videoMeta.duration);
-          const compStat = await fs.promises.stat(singleVideoPath);
-          const compSizeMb = compStat.size / (1024 * 1024);
 
+          const parts = await splitMp4IntoFastPartsIfNeeded(job.filePath);
           job.status = 'uploading_bot_api';
-          await updateTelegramProgressIfNeeded(
-            `📤 Uploading FULL Single Video (${compSizeMb.toFixed(1)} MB, complete video) to Telegram...`,
-            true
-          );
-          const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
-          const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
-          const upRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
-          if (!upRes.ok) {
-            throw new Error(upRes.error || 'Failed to upload single video');
-          }
-          if (upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
-            for (const destId of secondaryChatIds) {
-              await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, singleCaption);
+
+          for (let pIdx = 0; pIdx < parts.length; pIdx++) {
+            const partFile = parts[pIdx];
+            const pStat = await fs.promises.stat(partFile);
+            const pSizeMb = (pStat.size / (1024 * 1024)).toFixed(1);
+            const partCaption =
+              parts.length > 1
+                ? `🎬 ${job.title} [Part ${pIdx + 1}/${parts.length}]\n${folderLine}${resLine}${durMin}📦 Part Size: ${pSizeMb} MB`
+                : caption;
+
+            await updateTelegramProgressIfNeeded(
+              `📤 Sending Part ${pIdx + 1}/${parts.length} (${pSizeMb} MB) to Telegram...`,
+              true
+            );
+            const partMeta = await probeVideoMetadataAndThumb(partFile, `${job.id}_p${pIdx}`);
+            const upRes = await uploadToTelegramBotApi(partFile, primaryChat, partCaption, partMeta);
+
+            if (!upRes.ok) {
+              throw new Error(upRes.error || `Failed to send Part ${pIdx + 1}/${parts.length}`);
+            }
+
+            if (upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
+              for (const destId of secondaryChatIds) {
+                await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, partCaption);
+              }
             }
           }
+
           job.telegramResult = {
             deliveredVia: 'BOT_API_50MB',
             chatId: primaryChat,
-            fileSizeMb: compSizeMb.toFixed(2),
+            fileSizeMb: sizeMb.toFixed(2),
             timestamp: new Date().toISOString(),
             backedUpTo: enabledBackups.map((b) => b.title),
             routedToChannel: routedChannelLabel || undefined,
@@ -2792,35 +2813,9 @@ async function processDownloadJob(job: DownloadJob): Promise<void> {
           addBotLog(
             'OUTGOING',
             primaryChat,
-            `Delivered FULL single video ${job.title} (${compSizeMb.toFixed(2)} MB) without parts.`
+            `Delivered video ${job.title} (${sizeMb.toFixed(2)} MB) in ${parts.length} HD parts.`
           );
         }
-      } else {
-        // Full Single Video Mode (No parts!)
-        await updateTelegramProgressIfNeeded(
-          `🎬 Preparing 1 Full Single Video (${sizeMb.toFixed(1)} MB)...`,
-          true
-        );
-        const singleVideoPath = await compressMp4ToFit50Mb(job.filePath, videoMeta.duration);
-        const compStat = await fs.promises.stat(singleVideoPath);
-        const compSizeMb = compStat.size / (1024 * 1024);
-        job.status = 'uploading_bot_api';
-        const compMeta = await probeVideoMetadataAndThumb(singleVideoPath, `${job.id}_single`);
-        const singleCaption = `🎬 ${job.title} [Full Single Video]\n${folderLine}${resLine}${durMin}📦 Size: ${compSizeMb.toFixed(1)} MB`;
-        const upRes = await uploadToTelegramBotApi(singleVideoPath, primaryChat, singleCaption, compMeta);
-        if (upRes.ok && upRes.messageId && upRes.fromChatId && secondaryChatIds.length > 0) {
-          for (const destId of secondaryChatIds) {
-            await copyTelegramVideoMessage(upRes.fromChatId, upRes.messageId, destId, singleCaption);
-          }
-        }
-        job.telegramResult = {
-          deliveredVia: 'BOT_API_50MB',
-          chatId: primaryChat,
-          fileSizeMb: compSizeMb.toFixed(2),
-          timestamp: new Date().toISOString(),
-          backedUpTo: enabledBackups.map((b) => b.title),
-          routedToChannel: routedChannelLabel || undefined,
-        };
       }
 
       const totalElapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
