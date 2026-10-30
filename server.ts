@@ -1762,16 +1762,6 @@ async function deleteTelegramMessage(chatId: string | number, messageId: number 
   }
 }
 
-async function cleanOldLockMessages(chatId: string | number, currentMsgId: number) {
-  if (!currentMsgId) return;
-  for (let delta = -3; delta <= 3; delta++) {
-    if (delta === 0) continue;
-    const targetId = currentMsgId + delta;
-    if (targetId > 0) {
-      deleteTelegramMessage(chatId, targetId);
-    }
-  }
-}
 
 async function answerTelegramCallbackQuery(callbackQueryId: string, text?: string) {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
@@ -3226,10 +3216,6 @@ async function pollTelegramBotUpdates() {
           [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'Telegram User';
         const username = msg.from?.username;
 
-        // Auto-clean any spurious lock messages sent by old instances
-        if (msg.message_id) {
-          cleanOldLockMessages(chatId, msg.message_id);
-        }
 
         // 2. If user forwards a message from a Channel to the Bot, auto-add that Channel to Backup Channels!
         if (msg.forward_from_chat && (msg.forward_from_chat.type === 'channel' || msg.forward_from_chat.type === 'supergroup')) {
