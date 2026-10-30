@@ -503,21 +503,23 @@ async function robustFetchBuffer(
   let lastError: any;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 18000);
       const res = await fetch(url, { headers, redirect: 'follow', signal: controller.signal });
-      clearTimeout(timeout);
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
-      return Buffer.from(await res.arrayBuffer());
+      const arrBuf = await res.arrayBuffer();
+      clearTimeout(timeout);
+      return Buffer.from(arrBuf);
     } catch (err) {
+      clearTimeout(timeout);
       lastError = err;
-      // On attempt >= 2, use native C libcurl which never suffers from Node undici socket pool resets
+      // On attempt >= 2, use native C libcurl with 12s timeout which never hangs
       if (attempt >= 2) {
         try {
-          const curlArgs = ['-sL', '--fail', '--retry', '2', '--max-time', '20'];
+          const curlArgs = ['-sL', '--fail', '--retry', '1', '--max-time', '12', '--connect-timeout', '6'];
           for (const [k, v] of Object.entries(headers)) {
             curlArgs.push('-H', `${k}: ${v}`);
           }
@@ -533,7 +535,7 @@ async function robustFetchBuffer(
           lastError = curlErr;
         }
       }
-      await new Promise((r) => setTimeout(r, 350 * attempt));
+      await new Promise((r) => setTimeout(r, 250 * attempt));
     }
   }
 
